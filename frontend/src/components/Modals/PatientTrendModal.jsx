@@ -72,9 +72,9 @@ export const PatientTrendModal = ({ patient, isOpen, onClose, onStartScanForPati
           }}
         >
           <CircularGauge
-            score={patient.currentSeverity}
-            label={patient.currentSeverityLabel}
-            subtitle="SEVERITY"
+            score={patient.currentSeverity ?? patient.current_severity ?? null}
+            label={patient.currentSeverityLabel || patient.current_severity_label || (patient.currentSeverity ? null : "Awaiting Scan")}
+            subtitle="SEVERITY SCORE"
             size={120}
           />
         </div>
@@ -104,7 +104,7 @@ export const PatientTrendModal = ({ patient, isOpen, onClose, onStartScanForPati
             </span>
           </div>
           <p style={{ fontSize: "0.85rem", color: "#431407", lineHeight: "1.4", fontWeight: "500" }}>
-            {patient.aiRecommendation || "Elevate lower extremities. Compression therapy compliant."}
+            {patient.aiRecommendation || patient.ai_recommendation || "New patient profile registered. Capture or upload a wound image to run AI segmentation and severity scoring."}
           </p>
         </div>
 
@@ -118,7 +118,7 @@ export const PatientTrendModal = ({ patient, isOpen, onClose, onStartScanForPati
               Healing Trajectory
             </span>
           </div>
-          <SeverityTrendChart data={patient.trendData} />
+          <SeverityTrendChart data={patient.trendData || patient.trend_data || []} />
         </div>
 
         {/* Scan Timeline */}

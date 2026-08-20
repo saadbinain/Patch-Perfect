@@ -7,6 +7,7 @@ import confetti from "canvas-confetti";
 export const AIAnalysisWizard = ({
   patients = [],
   initialPatient = null,
+  onOpenNewPatient,
   onSaveAndReturn,
   onCancel,
 }) => {
@@ -182,75 +183,99 @@ export const AIAnalysisWizard = ({
           STEP 1: SELECT PATIENT
         </span>
 
-        <div style={{ position: "relative" }}>
-          <input
-            type="text"
-            placeholder="Search by name or ID..."
-            value={patientSearch}
-            onFocus={() => setShowPatientDropdown(true)}
-            onChange={(e) => {
-              setPatientSearch(e.target.value);
-              setShowPatientDropdown(true);
-            }}
-            style={{
-              width: "100%",
-              padding: "12px 14px",
-              borderRadius: "12px",
-              border: "1px solid #CBD5E1",
-              background: "#F8FAFC",
-              fontSize: "0.9rem",
-              outline: "none",
-            }}
-          />
-
-          {showPatientDropdown && (
-            <div
-              style={{
-                position: "absolute",
-                top: "100%",
-                left: 0,
-                right: 0,
-                background: "#FFFFFF",
-                borderRadius: "12px",
-                boxShadow: "0 10px 25px rgba(0,0,0,0.15)",
-                border: "1px solid #E2E8F0",
-                zIndex: 60,
-                marginTop: "4px",
-                maxHeight: "180px",
-                overflowY: "auto",
+        {patients.length === 0 ? (
+          <div style={{ padding: "12px", background: "#F8FAFC", borderRadius: "12px", border: "1px dashed #CBD5E1", textAlign: "center" }}>
+            <p style={{ fontSize: "0.85rem", color: "#64748B", marginBottom: "8px" }}>
+              No patient profiles exist yet. Create a patient first to link this scan.
+            </p>
+            {onOpenNewPatient && (
+              <button
+                type="button"
+                onClick={onOpenNewPatient}
+                className="btn-primary"
+                style={{ padding: "8px 14px", fontSize: "0.82rem", borderRadius: "8px" }}
+              >
+                + Enroll Patient Now
+              </button>
+            )}
+          </div>
+        ) : (
+          <div style={{ position: "relative" }}>
+            <input
+              type="text"
+              placeholder="Search by name or ID..."
+              value={patientSearch}
+              onFocus={() => setShowPatientDropdown(true)}
+              onChange={(e) => {
+                setPatientSearch(e.target.value);
+                setShowPatientDropdown(true);
               }}
-            >
-              {filteredPatients.map((p) => (
-                <div
-                  key={p.id}
-                  onClick={() => handlePatientSelect(p)}
-                  style={{
-                    padding: "10px 14px",
-                    borderBottom: "1px solid #F1F5F9",
-                    cursor: "pointer",
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                >
-                  <div>
-                    <strong style={{ fontSize: "0.88rem", color: "#1E293B" }}>{p.name}</strong>
-                    <span style={{ fontSize: "0.76rem", color: "#64748B", marginLeft: "6px" }}>
-                      ({p.woundType})
-                    </span>
+              style={{
+                width: "100%",
+                padding: "12px 14px",
+                borderRadius: "12px",
+                border: "1px solid #CBD5E1",
+                background: "#F8FAFC",
+                fontSize: "0.9rem",
+                outline: "none",
+              }}
+            />
+
+            {showPatientDropdown && (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "100%",
+                  left: 0,
+                  right: 0,
+                  background: "#FFFFFF",
+                  borderRadius: "12px",
+                  boxShadow: "0 10px 25px rgba(0,0,0,0.15)",
+                  border: "1px solid #E2E8F0",
+                  zIndex: 60,
+                  marginTop: "4px",
+                  maxHeight: "180px",
+                  overflowY: "auto",
+                }}
+              >
+                {filteredPatients.length > 0 ? (
+                  filteredPatients.map((p) => (
+                    <div
+                      key={p.id || p.custom_id}
+                      onClick={() => handlePatientSelect(p)}
+                      style={{
+                        padding: "10px 14px",
+                        borderBottom: "1px solid #F1F5F9",
+                        cursor: "pointer",
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                      }}
+                    >
+                      <div>
+                        <strong style={{ fontSize: "0.88rem", color: "#1E293B" }}>{p.name}</strong>
+                        <span style={{ fontSize: "0.76rem", color: "#64748B", marginLeft: "6px" }}>
+                          ({p.woundType})
+                        </span>
+                      </div>
+                      <span style={{ fontSize: "0.76rem", color: "#94A3B8" }}>#{p.id || p.custom_id}</span>
+                    </div>
+                  ))
+                ) : (
+                  <div style={{ padding: "12px", textAlign: "center", color: "#94A3B8", fontSize: "0.82rem" }}>
+                    No matching patient found
                   </div>
-                  <span style={{ fontSize: "0.76rem", color: "#94A3B8" }}>#{p.id}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
 
         {selectedPatient && (
           <div style={{ marginTop: "10px", display: "flex", alignItems: "center", gap: "8px" }}>
             <UserCheck size={16} color="#16A34A" />
             <span style={{ fontSize: "0.8rem", color: "#166534", fontWeight: "600" }}>
-              Active Patient: {selectedPatient.name} (#{selectedPatient.id})
+              Active Patient: {selectedPatient.name} (#{selectedPatient.id || selectedPatient.custom_id})
             </span>
           </div>
         )}

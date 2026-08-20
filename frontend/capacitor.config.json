@@ -1,0 +1,9 @@
+{
+  "appId": "com.patchperfect.ai",
+  "appName": "Patch Perfect AI",
+  "webDir": "dist",
+  "server": {
+    "cleartext": true,
+    "androidScheme": "https"
+  }
+}

@@ -63,35 +63,35 @@ class PatientSerializer(serializers.ModelSerializer):
         return obj.wound_profile.anatomical_location if hasattr(obj, 'wound_profile') else 'Lower Extremity'
 
     def get_status(self, obj):
-        return obj.wound_profile.status if hasattr(obj, 'wound_profile') else 'ACTION NEEDED'
+        return obj.wound_profile.status if hasattr(obj, 'wound_profile') else 'AWAITING SCAN'
 
     def get_statusType(self, obj):
-        return obj.wound_profile.status_type if hasattr(obj, 'wound_profile') else 'danger'
+        return obj.wound_profile.status_type if hasattr(obj, 'wound_profile') else 'warning'
 
     def get_lastUpdated(self, obj):
-        return obj.wound_profile.last_updated if hasattr(obj, 'wound_profile') else 'Today'
+        return obj.wound_profile.last_updated if hasattr(obj, 'wound_profile') else 'Just now'
 
     def get_currentSeverity(self, obj):
-        return obj.wound_profile.current_severity if hasattr(obj, 'wound_profile') else 3
+        return obj.wound_profile.current_severity if hasattr(obj, 'wound_profile') else None
 
     def get_currentSeverityLabel(self, obj):
-        return obj.wound_profile.current_severity_label if hasattr(obj, 'wound_profile') else 'Moderate'
+        return obj.wound_profile.current_severity_label if hasattr(obj, 'wound_profile') else 'Awaiting Scan'
 
     def get_healingStatus(self, obj):
-        return obj.wound_profile.healing_status if hasattr(obj, 'wound_profile') else 'Stable'
+        return obj.wound_profile.healing_status if hasattr(obj, 'wound_profile') else 'Not Assessed'
 
     def get_aiRecommendation(self, obj):
-        return obj.wound_profile.ai_recommendation if hasattr(obj, 'wound_profile') else ''
+        return obj.wound_profile.ai_recommendation if hasattr(obj, 'wound_profile') else 'New patient profile registered. Capture or upload a wound image to run AI segmentation and severity scoring.'
 
     def get_trend_data(self, obj):
         scans = obj.scans.all().order_by('scan_date')
         if not scans.exists():
-            return [{"week": "Week 1", "score": self.get_currentSeverity(obj)}]
+            return []
         
         trend = []
         for idx, scan in enumerate(scans):
             trend.append({
-                "week": f"Week {idx + 1}",
+                "week": f"Scan {idx + 1}",
                 "score": scan.severity_score,
             })
         return trend

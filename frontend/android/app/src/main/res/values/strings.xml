@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Patch Perfect AI</string>
+    <string name="title_activity_main">Patch Perfect AI</string>
+    <string name="package_name">com.patchperfect.ai</string>
+    <string name="custom_url_scheme">com.patchperfect.ai</string>
+</resources>

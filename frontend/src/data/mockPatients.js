@@ -1,4 +1,6 @@
-export const initialPatients = [
+export const initialPatients = [];
+
+export const demoPatients = [
   {
     id: "089",
     name: "Alken Valledor",

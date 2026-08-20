@@ -1,19 +1,26 @@
-import { initialPatients } from "../data/mockPatients";
+import { initialPatients, demoPatients } from "../data/mockPatients";
 import { treatmentGuidelines } from "../data/mockGuidelines";
 import { simulateAIAnalysis } from "../data/mockAI";
 
-const BACKEND_BASE_URL = "http://127.0.0.1:8000/api";
+const getBackendBaseUrl = () => {
+  if (typeof window !== "undefined" && window.location.hostname && window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") {
+    return `http://${window.location.hostname}:8000/api`;
+  }
+  return "http://127.0.0.1:8000/api";
+};
+
+const BACKEND_BASE_URL = getBackendBaseUrl();
 const STORAGE_KEY_PATIENTS = "patch_perfect_patients_v1";
 
 // Helpers for localStorage fallback persistence
 const getStoredPatients = () => {
   try {
     const data = localStorage.getItem(STORAGE_KEY_PATIENTS);
-    if (data) return JSON.parse(data);
+    if (data !== null) return JSON.parse(data);
   } catch (e) {
     console.error("Failed to load patients from local storage", e);
   }
-  return initialPatients;
+  return [];
 };
 
 const saveStoredPatients = (patients) => {
@@ -33,7 +40,7 @@ export const api = {
       });
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
+        if (Array.isArray(data)) {
           saveStoredPatients(data);
           return data;
         }
@@ -76,14 +83,14 @@ export const api = {
       notes: patientData.notes || "",
       woundType: patientData.woundType || "Diabetic Wound",
       anatomicalLocation: patientData.anatomicalLocation || "Lower Extremity",
-      status: "ACTION NEEDED",
-      statusType: "danger",
+      status: "AWAITING SCAN",
+      statusType: "warning",
       lastUpdated: "Just now",
-      currentSeverity: 3,
-      currentSeverityLabel: "Moderate",
-      healingStatus: "Stable",
-      aiRecommendation: "Initial assessment created. Awaiting baseline photograph.",
-      trend_data: [{ week: "Week 1", score: 3.0 }],
+      currentSeverity: null,
+      currentSeverityLabel: "Awaiting Scan",
+      healingStatus: "Not Assessed",
+      aiRecommendation: "New patient profile registered. Capture or upload a wound photograph to run AI segmentation and severity scoring.",
+      trend_data: [],
       scans: [],
     };
     const updated = [newPatient, ...existing];
@@ -216,9 +223,21 @@ export const api = {
     return treatmentGuidelines;
   },
 
-  // Reset to initial demo data
+  // Clear all data (new user state)
+  clearAllData: () => {
+    localStorage.removeItem(STORAGE_KEY_PATIENTS);
+    return [];
+  },
+
+  // Load sample demo data
+  loadDemoData: () => {
+    saveStoredPatients(demoPatients);
+    return demoPatients;
+  },
+
+  // Reset to initial (empty)
   resetDemoData: () => {
     localStorage.removeItem(STORAGE_KEY_PATIENTS);
-    return initialPatients;
+    return [];
   },
 };

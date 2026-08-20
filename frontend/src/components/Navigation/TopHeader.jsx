@@ -1,7 +1,14 @@
 import React from "react";
-import { Pill, ArrowLeft, X } from "lucide-react";
+import { Pill, ArrowLeft, Settings } from "lucide-react";
 
-export const TopHeader = ({ title = "Patch Perfect AI", isSubscreen = false, onBack, onCancel, showBrand = true }) => {
+export const TopHeader = ({
+  title = "Patch Perfect AI",
+  isSubscreen = false,
+  onBack,
+  onCancel,
+  showBrand = true,
+  onOpenSettings = null,
+}) => {
   if (isSubscreen) {
     return (
       <header className="top-app-bar" style={{ justifyContent: "space-between" }}>
@@ -59,19 +66,29 @@ export const TopHeader = ({ title = "Patch Perfect AI", isSubscreen = false, onB
         <h1 className="brand-title">{title}</h1>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-        <span
-          style={{
-            background: "rgba(255, 255, 255, 0.15)",
-            padding: "4px 8px",
-            borderRadius: "6px",
-            fontSize: "0.68rem",
-            fontWeight: "700",
-            letterSpacing: "0.04em",
-            textTransform: "uppercase",
-          }}
-        >
-          Clinic Mobile
-        </span>
+        {onOpenSettings && (
+          <button
+            onClick={onOpenSettings}
+            title="Open Settings"
+            style={{
+              background: "rgba(255, 255, 255, 0.2)",
+              border: "1px solid rgba(255, 255, 255, 0.28)",
+              color: "#FFFFFF",
+              width: "36px",
+              height: "36px",
+              borderRadius: "10px",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              transition: "transform 0.15s ease, background 0.15s ease",
+            }}
+            onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.92)")}
+            onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+          >
+            <Settings size={19} />
+          </button>
+        )}
       </div>
     </header>
   );

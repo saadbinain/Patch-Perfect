@@ -42,13 +42,13 @@ class PatientViewSet(viewsets.ModelViewSet):
             patient=patient,
             wound_type=wound_type,
             anatomical_location=anatomical_location,
-            status='ACTION NEEDED',
-            status_type='danger',
+            status='AWAITING SCAN',
+            status_type='warning',
             last_updated='Just now',
-            current_severity=3,
-            current_severity_label='Moderate',
-            healing_status='Stable',
-            ai_recommendation='Initial assessment created. Awaiting baseline photograph.',
+            current_severity=None,
+            current_severity_label='Awaiting Scan',
+            healing_status='Not Assessed',
+            ai_recommendation='New patient profile registered. Capture or upload a wound image to run AI segmentation and severity scoring.',
         )
 
         serializer = self.get_serializer(patient)

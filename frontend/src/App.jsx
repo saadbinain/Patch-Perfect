@@ -6,6 +6,7 @@ import { NewPatientModal } from "./components/Modals/NewPatientModal";
 import { PatientTrendModal } from "./components/Modals/PatientTrendModal";
 import { AIAnalysisWizard } from "./components/Analysis/AIAnalysisWizard";
 import { GuidelinesScreen } from "./components/Guidelines/GuidelinesScreen";
+import { SettingsModal } from "./components/Modals/SettingsModal";
 import { api } from "./services/api";
 
 export function App() {
@@ -13,10 +14,36 @@ export function App() {
   const [patients, setPatients] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
 
+  // PWA Install Prompt State
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+  const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+
   // Modals & Active Selections
   const [selectedPatientForTrend, setSelectedPatientForTrend] = useState(null);
   const [isNewPatientModalOpen, setIsNewPatientModalOpen] = useState(false);
   const [scanningPatient, setScanningPatient] = useState(null);
+
+  // Listen for native beforeinstallprompt event
+  useEffect(() => {
+    const handleBeforeInstall = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+
+    window.addEventListener("beforeinstallprompt", handleBeforeInstall);
+    return () => window.removeEventListener("beforeinstallprompt", handleBeforeInstall);
+  }, []);
+
+  const handleInstallNative = async () => {
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === "accepted") {
+        setDeferredPrompt(null);
+        setIsSettingsModalOpen(false);
+      }
+    }
+  };
 
   // Load patients from API / local storage
   const loadPatients = async () => {
@@ -55,13 +82,17 @@ export function App() {
     setActiveTab("wounds");
   };
 
-  // Reset Demo Data
+  // Load Demo Data
+  const handleLoadDemoData = () => {
+    const loaded = api.loadDemoData();
+    setPatients(loaded);
+  };
+
+  // Reset to Empty Data
   const handleResetData = () => {
-    if (window.confirm("Reset all patient records to initial manuscript sample?")) {
-      const resetList = api.resetDemoData();
-      setPatients(resetList);
-      setSelectedPatientForTrend(null);
-    }
+    const resetList = api.clearAllData();
+    setPatients(resetList);
+    setSelectedPatientForTrend(null);
   };
 
   return (
@@ -81,7 +112,10 @@ export function App() {
           }}
         />
       ) : (
-        <TopHeader title="Patch Perfect AI" />
+        <TopHeader
+          title="Patch Perfect AI"
+          onOpenSettings={() => setIsSettingsModalOpen(true)}
+        />
       )}
 
       {/* Main Content Body */}
@@ -91,6 +125,7 @@ export function App() {
             patients={patients}
             onSelectPatient={(patient) => setSelectedPatientForTrend(patient)}
             onOpenNewPatient={() => setIsNewPatientModalOpen(true)}
+            onLoadDemoData={handleLoadDemoData}
             onResetData={handleResetData}
           />
         )}
@@ -99,6 +134,7 @@ export function App() {
           <AIAnalysisWizard
             patients={patients}
             initialPatient={scanningPatient}
+            onOpenNewPatient={() => setIsNewPatientModalOpen(true)}
             onSaveAndReturn={handleSaveScanResult}
             onCancel={() => {
               setScanningPatient(null);
@@ -134,6 +170,17 @@ export function App() {
         isOpen={!!selectedPatientForTrend}
         onClose={() => setSelectedPatientForTrend(null)}
         onStartScanForPatient={handleStartScanForPatient}
+      />
+
+      {/* Settings & Preferences Modal */}
+      <SettingsModal
+        isOpen={isSettingsModalOpen}
+        onClose={() => setIsSettingsModalOpen(false)}
+        deferredPrompt={deferredPrompt}
+        onInstallNative={handleInstallNative}
+        onLoadDemoData={handleLoadDemoData}
+        onClearAllData={handleResetData}
+        patientCount={patients.length}
       />
     </div>
   );

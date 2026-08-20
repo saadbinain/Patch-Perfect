@@ -1,15 +1,51 @@
 import React from "react";
+import { TrendingUp, Activity } from "lucide-react";
 
 export const SeverityTrendChart = ({ data = [], height = 140 }) => {
-  // Fallback points if empty
-  const points = data.length > 0 ? data : [
-    { week: "Week 1", score: 4 },
-    { week: "Week 2", score: 3.5 },
-    { week: "Week 3", score: 2.8 },
-    { week: "Week 4", score: 2 },
-  ];
+  // If no trend data exists yet
+  if (!data || data.length === 0) {
+    return (
+      <div
+        style={{
+          width: "100%",
+          background: "#F8FAFC",
+          borderRadius: "14px",
+          padding: "24px 16px",
+          border: "1px dashed #CBD5E1",
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          textAlign: "center",
+          gap: "8px",
+        }}
+      >
+        <div
+          style={{
+            width: "36px",
+            height: "36px",
+            borderRadius: "10px",
+            background: "#F1F5F9",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "#94A3B8",
+          }}
+        >
+          <Activity size={20} />
+        </div>
+        <p style={{ fontSize: "0.85rem", fontWeight: "700", color: "#475569" }}>
+          No Scan History Yet
+        </p>
+        <p style={{ fontSize: "0.75rem", color: "#94A3B8", maxWidth: "260px", lineHeight: "1.4" }}>
+          Healing trajectory and severity changes will graph here once you save wound scans.
+        </p>
+      </div>
+    );
+  }
 
-  const maxVal = 10;
+  const points = data;
+  const maxVal = 5; // Severity scale 1 to 5
   const paddingLeft = 32;
   const paddingRight = 24;
   const paddingTop = 15;
@@ -21,21 +57,24 @@ export const SeverityTrendChart = ({ data = [], height = 140 }) => {
 
   // Calculate coordinates
   const coords = points.map((p, idx) => {
-    const x = paddingLeft + (idx / Math.max(1, points.length - 1)) * chartWidth;
-    const y = paddingTop + chartHeight - (p.score / maxVal) * chartHeight;
+    const x = points.length === 1 
+      ? paddingLeft + chartWidth / 2 
+      : paddingLeft + (idx / Math.max(1, points.length - 1)) * chartWidth;
+    const scoreVal = Number(p.score) || 0;
+    const y = paddingTop + chartHeight - (scoreVal / maxVal) * chartHeight;
     return { ...p, x, y };
   });
 
   const polylinePoints = coords.map((c) => `${c.x},${c.y}`).join(" ");
 
   // Create SVG path area under curve
-  const areaPath = `
+  const areaPath = points.length > 1 ? `
     M ${coords[0].x},${coords[0].y}
     ${coords.map((c) => `L ${c.x},${c.y}`).join(" ")}
     L ${coords[coords.length - 1].x},${paddingTop + chartHeight}
     L ${coords[0].x},${paddingTop + chartHeight}
     Z
-  `;
+  ` : "";
 
   return (
     <div style={{ width: "100%", background: "#F8FAFC", borderRadius: "12px", padding: "12px 8px 8px 8px", border: "1px solid #E2E8F0" }}>
@@ -47,8 +86,8 @@ export const SeverityTrendChart = ({ data = [], height = 140 }) => {
           </linearGradient>
         </defs>
 
-        {/* Grid lines */}
-        {[0, 2, 4, 6, 8, 10].map((val) => {
+        {/* Grid lines (1 to 5) */}
+        {[0, 1, 2, 3, 4, 5].map((val) => {
           const y = paddingTop + chartHeight - (val / maxVal) * chartHeight;
           return (
             <g key={val}>
@@ -76,17 +115,19 @@ export const SeverityTrendChart = ({ data = [], height = 140 }) => {
         })}
 
         {/* Filled Area */}
-        <path d={areaPath} fill="url(#trendGradient)" />
+        {areaPath && <path d={areaPath} fill="url(#trendGradient)" />}
 
         {/* Trend Line */}
-        <polyline
-          points={polylinePoints}
-          fill="none"
-          stroke="#8B1E1E"
-          strokeWidth="2.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
+        {points.length > 1 && (
+          <polyline
+            points={polylinePoints}
+            fill="none"
+            stroke="#8B1E1E"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        )}
 
         {/* Data Circles */}
         {coords.map((c, i) => (

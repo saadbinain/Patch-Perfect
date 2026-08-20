@@ -26,6 +26,7 @@ class WoundProfile(models.Model):
     ]
 
     STATUS_CHOICES = [
+        ('AWAITING SCAN', 'AWAITING SCAN'),
         ('ACTION NEEDED', 'ACTION NEEDED'),
         ('STABLE', 'STABLE'),
         ('IMPROVING', 'IMPROVING'),
@@ -35,13 +36,13 @@ class WoundProfile(models.Model):
     patient = models.OneToOneField(Patient, on_delete=models.CASCADE, related_name='wound_profile')
     wound_type = models.CharField(max_length=50, choices=WOUND_CHOICES, default='Diabetic Wound')
     anatomical_location = models.CharField(max_length=100, default='Lower Extremity')
-    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='ACTION NEEDED')
-    status_type = models.CharField(max_length=20, default='danger') # danger | success | warning
-    last_updated = models.CharField(max_length=50, default='Today')
-    current_severity = models.PositiveSmallIntegerField(default=3)
-    current_severity_label = models.CharField(max_length=30, default='Moderate')
-    healing_status = models.CharField(max_length=30, default='Stable')
-    ai_recommendation = models.TextField(blank=True, default='')
+    status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='AWAITING SCAN')
+    status_type = models.CharField(max_length=20, default='warning') # danger | success | warning | info
+    last_updated = models.CharField(max_length=50, default='Just now')
+    current_severity = models.PositiveSmallIntegerField(null=True, blank=True, default=None)
+    current_severity_label = models.CharField(max_length=30, default='Awaiting Scan')
+    healing_status = models.CharField(max_length=30, default='Not Assessed')
+    ai_recommendation = models.TextField(blank=True, default='New patient profile registered. Capture or upload a wound image to run AI segmentation and severity scoring.')
 
     def __str__(self):
         return f"{self.patient.name} - {self.wound_type}"
