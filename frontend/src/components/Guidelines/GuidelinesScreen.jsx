@@ -1,61 +1,87 @@
 import React, { useState } from "react";
-import { ShieldCheck, ChevronRight, Activity, Scissors, Bed, Droplets, Info } from "lucide-react";
+import { ShieldCheck, ChevronRight, Activity, Scissors, Bed, Droplets, Info, Search, X, BookOpen } from "lucide-react";
 import { treatmentGuidelines } from "../../data/mockGuidelines";
 import { GuidelineDetailModal } from "./GuidelineDetailModal";
 
 export const GuidelinesScreen = () => {
   const [selectedGuideline, setSelectedGuideline] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
-  // Icon mapping
   const getIcon = (type) => {
     switch (type) {
       case "foot":
-        return <Activity size={24} color="#E57373" />;
+        return <Activity size={22} color="#DC2626" />;
       case "scalpel":
-        return <Scissors size={24} color="#7E57C2" />;
+        return <Scissors size={22} color="#7C3AED" />;
       case "bed":
-        return <Bed size={24} color="#3F51B5" />;
+        return <Bed size={22} color="#2563EB" />;
       case "drop":
-        return <Droplets size={24} color="#E91E63" />;
+        return <Droplets size={22} color="#DB2777" />;
       default:
-        return <ShieldCheck size={24} color="#8B1E1E" />;
+        return <ShieldCheck size={22} color="#8B1E1E" />;
     }
   };
 
-  return (
-    <div style={{ padding: "18px 16px", display: "flex", flexDirection: "column", gap: "16px" }}>
-      {/* Guidelines Header */}
-      <div style={{ display: "flex", alignItems: "flex-start", gap: "12px" }}>
-        <div
-          style={{
-            width: "44px",
-            height: "44px",
-            borderRadius: "12px",
-            background: "#EFF6FF",
-            border: "1px solid #BFDBFE",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            color: "#3B82F6",
-            flexShrink: 0,
-          }}
-        >
-          <ShieldCheck size={24} />
-        </div>
+  const filteredGuidelines = treatmentGuidelines.filter((g) => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return true;
+    return (
+      g.title.toLowerCase().includes(q) ||
+      g.subtitle.toLowerCase().includes(q) ||
+      g.description?.toLowerCase().includes(q)
+    );
+  });
 
-        <div>
-          <h2 style={{ fontSize: "1.35rem", fontWeight: "800", color: "#0F172A" }}>
-            Treatment Guidelines
-          </h2>
-          <p style={{ fontSize: "0.82rem", color: "#64748B", marginTop: "2px" }}>
-            Evidence-based wound care protocols
-          </p>
-        </div>
+  return (
+    <div style={{ padding: "16px 14px 24px 14px", display: "flex", flexDirection: "column", gap: "14px" }}>
+      {/* Search Input */}
+      <div style={{ position: "relative" }}>
+        <span style={{ position: "absolute", left: "14px", top: "11px", color: "#94A3B8" }}>
+          <Search size={18} />
+        </span>
+        <input
+          type="text"
+          placeholder="Search wound treatment guidelines..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          style={{
+            width: "100%",
+            padding: "10px 38px 10px 40px",
+            borderRadius: "14px",
+            border: "1.5px solid #CBD5E1",
+            fontSize: "0.88rem",
+            color: "#0F172A",
+            backgroundColor: "#FFFFFF",
+            outline: "none",
+          }}
+        />
+        {searchQuery && (
+          <button
+            onClick={() => setSearchQuery("")}
+            style={{
+              position: "absolute",
+              right: "12px",
+              top: "10px",
+              background: "#E2E8F0",
+              border: "none",
+              borderRadius: "50%",
+              width: "20px",
+              height: "20px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              color: "#64748B",
+            }}
+          >
+            <X size={12} />
+          </button>
+        )}
       </div>
 
       {/* Guidelines Cards List */}
-      <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-        {treatmentGuidelines.map((item) => (
+      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+        {filteredGuidelines.map((item) => (
           <div
             key={item.id}
             onClick={() => setSelectedGuideline(item)}
@@ -64,41 +90,52 @@ export const GuidelinesScreen = () => {
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
-              gap: "14px",
-              padding: "16px",
-              borderRadius: "16px",
+              gap: "12px",
+              padding: "14px 16px",
+              borderRadius: "18px",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: "14px", flex: 1 }}>
-              {/* Icon */}
+            <div style={{ display: "flex", alignItems: "center", gap: "12px", flex: 1, minWidth: 0 }}>
+              {/* Icon Container */}
               <div
                 style={{
                   width: "44px",
                   height: "44px",
-                  borderRadius: "12px",
+                  borderRadius: "14px",
                   backgroundColor: "#F8FAFC",
                   border: "1px solid #E2E8F0",
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
                   flexShrink: 0,
+                  boxShadow: "0 2px 6px rgba(0,0,0,0.03)",
                 }}
               >
                 {getIcon(item.iconType)}
               </div>
 
               {/* Text */}
-              <div style={{ display: "flex", flexDirection: "column", gap: "2px", flex: 1 }}>
-                <h4 style={{ fontSize: "0.98rem", fontWeight: "700", color: "#0F172A" }}>
+              <div style={{ display: "flex", flexDirection: "column", gap: "2px", flex: 1, minWidth: 0 }}>
+                <h4
+                  style={{
+                    fontSize: "0.94rem",
+                    fontWeight: "700",
+                    color: "#0F172A",
+                    margin: 0,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
                   {item.title}
                 </h4>
-                <p style={{ fontSize: "0.78rem", color: "#64748B", lineHeight: "1.3" }}>
+                <p style={{ fontSize: "0.76rem", color: "#64748B", margin: 0, lineHeight: 1.3 }}>
                   {item.subtitle}
                 </p>
               </div>
             </div>
 
-            <ChevronRight size={18} color="#94A3B8" />
+            <ChevronRight size={18} color="#CBD5E1" style={{ flexShrink: 0 }} />
           </div>
         ))}
       </div>
@@ -108,17 +145,17 @@ export const GuidelinesScreen = () => {
         style={{
           background: "#F8FAFC",
           borderRadius: "14px",
-          padding: "14px",
+          padding: "12px 14px",
           border: "1px solid #E2E8F0",
           display: "flex",
           gap: "10px",
           alignItems: "flex-start",
-          marginTop: "12px",
+          marginTop: "4px",
         }}
       >
-        <Info size={18} color="#64748B" style={{ flexShrink: 0, marginTop: "2px" }} />
-        <p style={{ fontSize: "0.76rem", color: "#64748B", lineHeight: "1.4" }}>
-          These guidelines synthesize international clinical best practices for community healthcare workers. In cases of critical infection or systemic compromise, escalate immediately to a specialized wound physician.
+        <Info size={16} color="#64748B" style={{ flexShrink: 0, marginTop: "2px" }} />
+        <p style={{ fontSize: "0.74rem", color: "#64748B", lineHeight: "1.4", margin: 0 }}>
+          Evidence-based clinical guidelines synthesize international best practices. If severe infection or necrosis is detected, escalate to specialized surgical wound consultation immediately.
         </p>
       </div>
 

@@ -16,6 +16,10 @@ class Patient(models.Model):
     def __str__(self):
         return f"{self.name} (#{self.custom_id})"
 
+    @property
+    def primary_wound(self):
+        return self.wounds.first()
+
 
 class WoundProfile(models.Model):
     WOUND_CHOICES = [
@@ -33,7 +37,8 @@ class WoundProfile(models.Model):
         ('DETERIORATING', 'DETERIORATING'),
     ]
 
-    patient = models.OneToOneField(Patient, on_delete=models.CASCADE, related_name='wound_profile')
+    patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='wounds')
+    label = models.CharField(max_length=150, default='Primary Wound', help_text="Wound site label or custom name")
     wound_type = models.CharField(max_length=50, choices=WOUND_CHOICES, default='Diabetic Wound')
     anatomical_location = models.CharField(max_length=100, default='Lower Extremity')
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default='AWAITING SCAN')
@@ -43,9 +48,13 @@ class WoundProfile(models.Model):
     current_severity_label = models.CharField(max_length=30, default='Awaiting Scan')
     healing_status = models.CharField(max_length=30, default='Not Assessed')
     ai_recommendation = models.TextField(blank=True, default='New patient profile registered. Capture or upload a wound image to run AI segmentation and severity scoring.')
+    created_at = models.DateTimeField(auto_now_add=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['created_at', 'id']
 
     def __str__(self):
-        return f"{self.patient.name} - {self.wound_type}"
+        return f"{self.patient.name} - {self.label} ({self.wound_type})"
 
 
 class WoundAssessmentScan(models.Model):

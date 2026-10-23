@@ -1,20 +1,30 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   X,
   Settings,
   Database,
   Trash2,
-  Sparkles,
-  Smartphone,
-  Download,
-  Share,
-  MoreVertical,
-  PlusSquare,
-  Cpu,
+  Calendar,
+  Clock,
+  RotateCcw,
+  FastForward,
+  CalendarDays,
   CheckCircle2,
-  Server,
   Info,
+  LogOut,
+  UserCheck,
+  Shield,
 } from "lucide-react";
+import {
+  getSimulatedDateConfig,
+  saveSimulatedDateConfig,
+  formatDisplayDate,
+  getEffectiveDate,
+  formatDateInput,
+  formatTimeInput,
+  advanceSimulatedDays,
+  resetToLiveDate,
+} from "../../services/dateService";
 
 export const SettingsModal = ({
   isOpen,
@@ -24,29 +34,99 @@ export const SettingsModal = ({
   onLoadDemoData,
   onClearAllData,
   patientCount = 0,
+  currentUser = null,
+  onLogout = null,
 }) => {
   const [showInstallGuide, setShowInstallGuide] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState("");
 
+  // Date Simulation State
+  const [simConfig, setSimConfig] = useState(getSimulatedDateConfig());
+
+  useEffect(() => {
+    if (isOpen) {
+      setSimConfig(getSimulatedDateConfig());
+    }
+  }, [isOpen]);
+
   if (!isOpen) return null;
 
-  const handleLoadDemo = () => {
+  const handleToggleSimulation = (enabled) => {
+    const updated = {
+      ...simConfig,
+      enabled,
+      date: simConfig.date || formatDateInput(new Date()),
+      time: simConfig.time || formatTimeInput(new Date()),
+    };
+    setSimConfig(updated);
+    saveSimulatedDateConfig(updated);
+    setFeedbackMsg(
+      enabled
+        ? `Simulated date active: ${formatDisplayDate(getEffectiveDate(), true)}`
+        : "Reverted to live system clock."
+    );
+    setTimeout(() => setFeedbackMsg(""), 3500);
+  };
+
+  const handleDateChange = (newDate) => {
+    const updated = {
+      ...simConfig,
+      enabled: true,
+      date: newDate,
+    };
+    setSimConfig(updated);
+    saveSimulatedDateConfig(updated);
+    setFeedbackMsg(`Date set to: ${formatDisplayDate(getEffectiveDate(), true)}`);
+    setTimeout(() => setFeedbackMsg(""), 3500);
+  };
+
+  const handleTimeChange = (newTime) => {
+    const updated = {
+      ...simConfig,
+      enabled: true,
+      time: newTime,
+    };
+    setSimConfig(updated);
+    saveSimulatedDateConfig(updated);
+    setFeedbackMsg(`Time set to: ${formatDisplayDate(getEffectiveDate(), true)}`);
+    setTimeout(() => setFeedbackMsg(""), 3500);
+  };
+
+  const handleAdvanceDays = (days) => {
+    const updated = advanceSimulatedDays(days);
+    setSimConfig(updated);
+    setFeedbackMsg(`Advanced date by ${days} day(s): ${formatDisplayDate(getEffectiveDate(), true)}`);
+    setTimeout(() => setFeedbackMsg(""), 3500);
+  };
+
+  const handleResetDate = () => {
+    const updated = resetToLiveDate();
+    setSimConfig(updated);
+    setFeedbackMsg("Reset to live system clock.");
+    setTimeout(() => setFeedbackMsg(""), 3500);
+  };
+
+  const handleLoadDemo = async () => {
     if (onLoadDemoData) {
-      onLoadDemoData();
+      setFeedbackMsg("Loading sample patient profiles...");
+      await onLoadDemoData();
       setFeedbackMsg("Loaded 5 manuscript sample patient profiles!");
       setTimeout(() => setFeedbackMsg(""), 3500);
     }
   };
 
-  const handleClearData = () => {
-    if (window.confirm("Are you sure you want to clear all patient profiles and return to a new-user state?")) {
+  const handleClearData = async () => {
+    if (window.confirm("Are you sure you want to clear all patient profiles and return to an empty state?")) {
       if (onClearAllData) {
-        onClearAllData();
+        setFeedbackMsg("Clearing records...");
+        await onClearAllData();
         setFeedbackMsg("All patient records cleared successfully.");
         setTimeout(() => setFeedbackMsg(""), 3500);
       }
     }
   };
+
+  const effectiveDate = getEffectiveDate();
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -86,7 +166,7 @@ export const SettingsModal = ({
                 Settings & System
               </h3>
               <p style={{ fontSize: "0.76rem", color: "#64748B" }}>
-                Preferences, data management, and AI pipeline
+                Simulation, preferences, and data management
               </p>
             </div>
           </div>
@@ -142,7 +222,224 @@ export const SettingsModal = ({
             paddingRight: "2px",
           }}
         >
-          {/* SECTION 1: DATA & STORAGE MANAGEMENT */}
+          {/* SECTION 1: CLINICAL DATE & TIME SIMULATION */}
+          <div
+            style={{
+              background: "#F8FAFC",
+              border: "1px solid #E2E8F0",
+              borderRadius: "14px",
+              padding: "14px",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: "10px",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <CalendarDays size={17} color="#8B1E1E" />
+                <span
+                  style={{
+                    fontSize: "0.82rem",
+                    fontWeight: "700",
+                    color: "#0F172A",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.04em",
+                  }}
+                >
+                  Clinical Date Simulation
+                </span>
+              </div>
+              <span
+                style={{
+                  fontSize: "0.72rem",
+                  fontWeight: "700",
+                  color: simConfig.enabled ? "#991B1B" : "#166534",
+                  background: simConfig.enabled ? "#FEE2E2" : "#DCFCE7",
+                  padding: "2px 8px",
+                  borderRadius: "6px",
+                }}
+              >
+                {simConfig.enabled ? "SIMULATION ON" : "LIVE CLOCK"}
+              </span>
+            </div>
+
+            <p style={{ fontSize: "0.76rem", color: "#64748B", marginBottom: "12px", lineHeight: "1.4" }}>
+              Alters the assessment date so you can test wound healing trajectories, scan next-day follow-ups, or backfill past evaluations.
+            </p>
+
+            {/* Current Active Date Badge */}
+            <div
+              style={{
+                background: simConfig.enabled ? "#FFF1F2" : "#FFFFFF",
+                border: simConfig.enabled ? "1px solid #FECDD3" : "1px solid #E2E8F0",
+                borderRadius: "10px",
+                padding: "10px 12px",
+                marginBottom: "12px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <div>
+                <span style={{ fontSize: "0.7rem", color: "#64748B", display: "block", textTransform: "uppercase", fontWeight: "600" }}>
+                  Active Assessment Date
+                </span>
+                <strong style={{ fontSize: "0.92rem", color: simConfig.enabled ? "#991B1B" : "#0F172A" }}>
+                  {formatDisplayDate(effectiveDate, true)}
+                </strong>
+              </div>
+
+              {simConfig.enabled ? (
+                <button
+                  onClick={handleResetDate}
+                  title="Reset to live clock"
+                  style={{
+                    background: "#FFFFFF",
+                    border: "1px solid #FECDD3",
+                    color: "#991B1B",
+                    padding: "5px 10px",
+                    borderRadius: "6px",
+                    fontSize: "0.74rem",
+                    fontWeight: "600",
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "4px",
+                  }}
+                >
+                  <RotateCcw size={12} />
+                  <span>Reset</span>
+                </button>
+              ) : null}
+            </div>
+
+            {/* Date and Time Pickers */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "12px" }}>
+              <div>
+                <label style={{ display: "block", fontSize: "0.74rem", fontWeight: "600", color: "#334155", marginBottom: "4px" }}>
+                  📅 Select Date
+                </label>
+                <input
+                  type="date"
+                  value={simConfig.date || formatDateInput(new Date())}
+                  onChange={(e) => handleDateChange(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "8px 10px",
+                    borderRadius: "8px",
+                    border: "1px solid #CBD5E1",
+                    fontSize: "0.82rem",
+                    color: "#0F172A",
+                    backgroundColor: "#FFFFFF",
+                    outline: "none",
+                  }}
+                />
+              </div>
+
+              <div>
+                <label style={{ display: "block", fontSize: "0.74rem", fontWeight: "600", color: "#334155", marginBottom: "4px" }}>
+                  🕒 Select Time
+                </label>
+                <input
+                  type="time"
+                  value={simConfig.time || formatTimeInput(new Date())}
+                  onChange={(e) => handleTimeChange(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "8px 10px",
+                    borderRadius: "8px",
+                    border: "1px solid #CBD5E1",
+                    fontSize: "0.82rem",
+                    color: "#0F172A",
+                    backgroundColor: "#FFFFFF",
+                    outline: "none",
+                  }}
+                />
+              </div>
+            </div>
+
+            {/* Quick Shift Presets */}
+            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              <span style={{ fontSize: "0.72rem", color: "#64748B", fontWeight: "600" }}>
+                Quick Presets:
+              </span>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                <button
+                  onClick={() => handleAdvanceDays(1)}
+                  style={{
+                    background: "#FFFFFF",
+                    border: "1px solid #CBD5E1",
+                    color: "#0F172A",
+                    padding: "6px 10px",
+                    borderRadius: "8px",
+                    fontSize: "0.74rem",
+                    fontWeight: "600",
+                    cursor: "pointer",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "4px",
+                  }}
+                >
+                  <FastForward size={13} color="#8B1E1E" />
+                  <span>+1 Day (Next Day)</span>
+                </button>
+
+                <button
+                  onClick={() => handleAdvanceDays(3)}
+                  style={{
+                    background: "#FFFFFF",
+                    border: "1px solid #CBD5E1",
+                    color: "#0F172A",
+                    padding: "6px 10px",
+                    borderRadius: "8px",
+                    fontSize: "0.74rem",
+                    fontWeight: "600",
+                    cursor: "pointer",
+                  }}
+                >
+                  +3 Days
+                </button>
+
+                <button
+                  onClick={() => handleAdvanceDays(7)}
+                  style={{
+                    background: "#FFFFFF",
+                    border: "1px solid #CBD5E1",
+                    color: "#0F172A",
+                    padding: "6px 10px",
+                    borderRadius: "8px",
+                    fontSize: "0.74rem",
+                    fontWeight: "600",
+                    cursor: "pointer",
+                  }}
+                >
+                  +1 Week (7 Days)
+                </button>
+
+                <button
+                  onClick={() => handleAdvanceDays(-1)}
+                  style={{
+                    background: "#FFFFFF",
+                    border: "1px solid #CBD5E1",
+                    color: "#64748B",
+                    padding: "6px 10px",
+                    borderRadius: "8px",
+                    fontSize: "0.74rem",
+                    fontWeight: "600",
+                    cursor: "pointer",
+                  }}
+                >
+                  -1 Day (Yesterday)
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* SECTION 2: DATA & STORAGE MANAGEMENT */}
           <div
             style={{
               background: "#F8FAFC",
@@ -187,48 +484,6 @@ export const SettingsModal = ({
               </span>
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-              {/* Load Sample Demo Profiles */}
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  background: "#FFFFFF",
-                  padding: "10px 12px",
-                  borderRadius: "10px",
-                  border: "1px solid #E2E8F0",
-                }}
-              >
-                <div>
-                  <strong style={{ fontSize: "0.86rem", color: "#1E293B", display: "block" }}>
-                    Load Demo Dataset
-                  </strong>
-                  <span style={{ fontSize: "0.74rem", color: "#64748B" }}>
-                    Populate 5 sample manuscript patients with scans
-                  </span>
-                </div>
-                <button
-                  onClick={handleLoadDemo}
-                  style={{
-                    background: "#F1F5F9",
-                    border: "1px solid #CBD5E1",
-                    color: "#0F172A",
-                    padding: "7px 12px",
-                    borderRadius: "8px",
-                    fontSize: "0.78rem",
-                    fontWeight: "600",
-                    cursor: "pointer",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "5px",
-                  }}
-                >
-                  <Sparkles size={14} color="#8B1E1E" />
-                  <span>Load</span>
-                </button>
-              </div>
-
               {/* Clear All Patient Data */}
               <div
                 style={{
@@ -236,17 +491,17 @@ export const SettingsModal = ({
                   alignItems: "center",
                   justifyContent: "space-between",
                   background: "#FFFFFF",
-                  padding: "10px 12px",
-                  borderRadius: "10px",
+                  padding: "12px 14px",
+                  borderRadius: "12px",
                   border: "1px solid #E2E8F0",
                 }}
               >
                 <div>
-                  <strong style={{ fontSize: "0.86rem", color: "#991B1B", display: "block" }}>
+                  <strong style={{ fontSize: "0.88rem", color: "#991B1B", display: "block" }}>
                     Clear All Records
                   </strong>
-                  <span style={{ fontSize: "0.74rem", color: "#64748B" }}>
-                    Restore empty new-user state
+                  <span style={{ fontSize: "0.75rem", color: "#64748B" }}>
+                    Reset database and restore empty state
                   </span>
                 </div>
                 <button
@@ -255,10 +510,10 @@ export const SettingsModal = ({
                     background: "#FEF2F2",
                     border: "1px solid #FECDD3",
                     color: "#991B1B",
-                    padding: "7px 12px",
+                    padding: "8px 14px",
                     borderRadius: "8px",
                     fontSize: "0.78rem",
-                    fontWeight: "600",
+                    fontWeight: "700",
                     cursor: "pointer",
                     display: "flex",
                     alignItems: "center",
@@ -270,9 +525,8 @@ export const SettingsModal = ({
                 </button>
               </div>
             </div>
-          </div>
 
-          {/* SECTION 2: DEVICE APP INSTALLATION (PWA) */}
+          {/* SECTION 3: CLINICIAN ACCOUNT & SESSION */}
           <div
             style={{
               background: "#F8FAFC",
@@ -281,116 +535,98 @@ export const SettingsModal = ({
               padding: "14px",
             }}
           >
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }}>
-              <Smartphone size={17} color="#8B1E1E" />
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <UserCheck size={17} color="#8B1E1E" />
+                <span
+                  style={{
+                    fontSize: "0.82rem",
+                    fontWeight: "700",
+                    color: "#0F172A",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.04em",
+                  }}
+                >
+                  Clinician Account
+                </span>
+              </div>
               <span
                 style={{
-                  fontSize: "0.82rem",
+                  fontSize: "0.72rem",
                   fontWeight: "700",
-                  color: "#0F172A",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
+                  color: "#059669",
+                  background: "#ECFDF5",
+                  padding: "2px 8px",
+                  borderRadius: "6px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "4px",
                 }}
               >
-                Install App on Device
+                <Shield size={11} />
+                <span>Active Session</span>
               </span>
             </div>
 
-            {deferredPrompt && (
-              <button
-                onClick={onInstallNative}
-                className="btn-primary"
-                style={{ width: "100%", padding: "11px", fontSize: "0.88rem", marginBottom: "10px" }}
-              >
-                <Download size={17} />
-                <span>Install Patch Perfect Now</span>
-              </button>
-            )}
+            {currentUser ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                <div
+                  style={{
+                    background: "#FFFFFF",
+                    padding: "10px 12px",
+                    borderRadius: "10px",
+                    border: "1px solid #E2E8F0",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                  }}
+                >
+                  <div>
+                    <strong style={{ fontSize: "0.88rem", color: "#0F172A", display: "block" }}>
+                      {currentUser.full_name || currentUser.username}
+                    </strong>
+                    <span style={{ fontSize: "0.75rem", color: "#64748B" }}>
+                      @{currentUser.username} • {currentUser.role || "Clinician"}
+                    </span>
+                  </div>
 
-            <button
-              onClick={() => setShowInstallGuide(!showInstallGuide)}
-              style={{
-                width: "100%",
-                background: "#FFFFFF",
-                border: "1px solid #CBD5E1",
-                padding: "8px 12px",
-                borderRadius: "8px",
-                fontSize: "0.8rem",
-                fontWeight: "600",
-                color: "#334155",
-                cursor: "pointer",
-                textAlign: "center",
-              }}
-            >
-              {showInstallGuide ? "Hide Installation Instructions ▲" : "View Add-to-Home-Screen Instructions ▼"}
-            </button>
-
-            {showInstallGuide && (
-              <div style={{ marginTop: "12px", display: "flex", flexDirection: "column", gap: "8px" }}>
-                <div style={{ background: "#FFFFFF", padding: "10px 12px", borderRadius: "8px", border: "1px solid #E2E8F0" }}>
-                  <strong style={{ fontSize: "0.82rem", color: "#0F172A" }}>🤖 Android (Chrome):</strong>
-                  <p style={{ fontSize: "0.76rem", color: "#475569", marginTop: "2px" }}>
-                    Tap top-right <strong>3 dots <MoreVertical size={13} style={{ verticalAlign: "middle" }} /></strong> &gt; Select <strong>"Add to Home screen"</strong> or <strong>"Install app"</strong>.
-                  </p>
-                </div>
-                <div style={{ background: "#FFFFFF", padding: "10px 12px", borderRadius: "8px", border: "1px solid #E2E8F0" }}>
-                  <strong style={{ fontSize: "0.82rem", color: "#0F172A" }}>🍎 iPhone (Safari):</strong>
-                  <p style={{ fontSize: "0.76rem", color: "#475569", marginTop: "2px" }}>
-                    Tap <strong>Share <Share size={13} style={{ verticalAlign: "middle" }} /></strong> &gt; Scroll down and tap <strong>"Add to Home Screen" <PlusSquare size={13} style={{ verticalAlign: "middle" }} /></strong>.
-                  </p>
+                  <button
+                    onClick={async () => {
+                      if (window.confirm("Are you sure you want to sign out of Patch Perfect?")) {
+                        onClose();
+                        if (onLogout) await onLogout();
+                      }
+                    }}
+                    style={{
+                      background: "#FEF2F2",
+                      border: "1px solid #FECDD3",
+                      color: "#991B1B",
+                      padding: "7px 12px",
+                      borderRadius: "8px",
+                      fontSize: "0.78rem",
+                      fontWeight: "700",
+                      cursor: "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "5px",
+                    }}
+                  >
+                    <LogOut size={13} />
+                    <span>Sign Out</span>
+                  </button>
                 </div>
               </div>
+            ) : (
+              <p style={{ fontSize: "0.78rem", color: "#64748B", margin: 0 }}>
+                Running in guest session mode.
+              </p>
             )}
           </div>
 
-          {/* SECTION 3: AI PIPELINE ARCHITECTURE */}
-          <div
-            style={{
-              background: "#F8FAFC",
-              border: "1px solid #E2E8F0",
-              borderRadius: "14px",
-              padding: "14px",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }}>
-              <Cpu size={17} color="#8B1E1E" />
-              <span
-                style={{
-                  fontSize: "0.82rem",
-                  fontWeight: "700",
-                  color: "#0F172A",
-                  textTransform: "uppercase",
-                  letterSpacing: "0.04em",
-                }}
-              >
-                AI Pipeline Architecture
-              </span>
-            </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px", fontSize: "0.78rem" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", color: "#334155" }}>
-                <span>1. Siamese Verification</span>
-                <strong style={{ color: "#166534" }}>ResNet50 ✓</strong>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", color: "#334155" }}>
-                <span>2. Boundary Segmentation</span>
-                <strong style={{ color: "#166534" }}>FUSegNet ✓</strong>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", color: "#334155" }}>
-                <span>3. Ulcer Classification</span>
-                <strong style={{ color: "#166534" }}>VGG16 ✓</strong>
-              </div>
-              <div style={{ display: "flex", justifyContent: "space-between", color: "#334155" }}>
-                <span>4. Tissue Severity Grading</span>
-                <strong style={{ color: "#166534" }}>FPN + VGG16 ✓</strong>
-              </div>
-            </div>
-          </div>
-
-          {/* SECTION 4: ABOUT */}
+          {/* SECTION 6: ABOUT */}
           <div style={{ textAlign: "center", padding: "6px 0 2px 0" }}>
             <span style={{ fontSize: "0.72rem", color: "#94A3B8" }}>
-              Patch Perfect AI • Version 1.0.0 (Research Prototype)
+              Patch Perfect AI • Version 1.0.0 (Clinical Research)
             </span>
           </div>
         </div>

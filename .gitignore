@@ -1,0 +1,69 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Django stuff
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+media/
+
+# AI Model weights & checkpoints (Too large for GitHub > 100MB)
+backend/ai_models/weights/
+*.pth
+*.pt
+*.bin
+*.h5
+*.hdf5
+*.onnx
+*.safetensors
+*.ckpt
+
+# Node & Frontend
+node_modules/
+.npm
+frontend/dist/
+frontend/dist-ssr/
+
+# IDE & OS files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Manuscripts / Large docs if needed
+*.docx

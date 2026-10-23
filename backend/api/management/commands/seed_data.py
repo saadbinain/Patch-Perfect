@@ -323,23 +323,24 @@ class Command(BaseCommand):
                 defaults=p_data
             )
 
-            wp, _ = WoundProfile.objects.update_or_create(
+            # Clear old wounds and scans
+            patient.wounds.all().delete()
+            patient.scans.all().delete()
+
+            wp = WoundProfile.objects.create(
                 patient=patient,
-                defaults={
-                    "wound_type": wound_type,
-                    "anatomical_location": anatomical_location,
-                    "status": status_val,
-                    "status_type": status_type,
-                    "last_updated": last_updated,
-                    "current_severity": current_severity,
-                    "current_severity_label": current_severity_label,
-                    "healing_status": healing_status,
-                    "ai_recommendation": ai_recommendation,
-                }
+                label=f"{anatomical_location} {wound_type}".strip(),
+                wound_type=wound_type,
+                anatomical_location=anatomical_location,
+                status=status_val,
+                status_type=status_type,
+                last_updated=last_updated,
+                current_severity=current_severity,
+                current_severity_label=current_severity_label,
+                healing_status=healing_status,
+                ai_recommendation=ai_recommendation,
             )
 
-            # Clear old scans before seeding
-            patient.scans.all().delete()
             for s in scans_data:
                 WoundAssessmentScan.objects.create(
                     patient=patient,
@@ -357,4 +358,35 @@ class Command(BaseCommand):
                     is_latest=s["is_latest"],
                 )
 
-        self.stdout.write(self.style.SUCCESS("Successfully seeded Patch Perfect database!"))
+            # Add a secondary wound site for Alken Valledor (#089) for demonstration
+            if patient.custom_id == "089":
+                wp2 = WoundProfile.objects.create(
+                    patient=patient,
+                    label="Right Lateral Malleolus (Pressure)",
+                    wound_type="Pressure Injury",
+                    anatomical_location="Right Ankle",
+                    status="STABLE",
+                    status_type="success",
+                    last_updated="Yesterday",
+                    current_severity=2,
+                    current_severity_label="Mild",
+                    healing_status="Improving",
+                    ai_recommendation="Epithelialization advancing from margins. Maintain silicone foam dressing.",
+                )
+                WoundAssessmentScan.objects.create(
+                    patient=patient,
+                    wound_profile=wp2,
+                    severity_score=2,
+                    severity_level="Mild",
+                    healing_status="Improving",
+                    wound_type="Pressure Injury",
+                    anatomical_location="Right Ankle",
+                    recommendation="Healthy granulation bed with reduction in periwound erythema.",
+                    granulation_percent=75,
+                    slough_percent=20,
+                    necrotic_percent=5,
+                    scan_date_formatted="Yesterday, 02:15 PM",
+                    is_latest=True,
+                )
+
+        self.stdout.write(self.style.SUCCESS("Successfully seeded Patch Perfect database with multi-wound profiles!"))

@@ -1,19 +1,47 @@
-import React, { useState, useRef } from "react";
-import { Camera, Microscope, CheckCircle2, RefreshCw, ArrowLeft, Save, Sparkles, Upload, UserCheck } from "lucide-react";
+import React, { useState, useRef, useEffect } from "react";
+import {
+  Camera,
+  Microscope,
+  CheckCircle2,
+  RefreshCw,
+  UserCheck,
+  Calendar,
+  FastForward,
+  MapPin,
+  Plus,
+  AlertTriangle,
+} from "lucide-react";
 import { CircularGauge } from "../Common/CircularGauge";
 import { api } from "../../services/api";
+import {
+  getEffectiveDate,
+  formatDisplayDate,
+  formatDateInput,
+  formatTimeInput,
+} from "../../services/dateService";
 import confetti from "canvas-confetti";
 
 export const AIAnalysisWizard = ({
   patients = [],
   initialPatient = null,
+  initialWound = null,
   onOpenNewPatient,
   onSaveAndReturn,
   onCancel,
 }) => {
   const [selectedPatientId, setSelectedPatientId] = useState(initialPatient?.id || initialPatient?.custom_id || "");
+  const [selectedWoundId, setSelectedWoundId] = useState(initialWound?.id || null);
   const [patientSearch, setPatientSearch] = useState(initialPatient?.name || "");
   const [showPatientDropdown, setShowPatientDropdown] = useState(false);
+
+  // Inline wound creation state in wizard
+  const [isAddingWoundInWizard, setIsAddingWoundInWizard] = useState(false);
+  const [wizardNewWound, setWizardNewWound] = useState({
+    anatomicalLocation: "",
+    woundType: "Pending AI Scan",
+    label: "",
+  });
+  const [isSavingWoundInWizard, setIsSavingWoundInWizard] = useState(false);
 
   const [currentStep, setCurrentStep] = useState(initialPatient ? 2 : 1);
   const [imagePreview, setImagePreview] = useState(null);
@@ -21,17 +49,30 @@ export const AIAnalysisWizard = ({
   const [analysisStage, setAnalysisStage] = useState("");
   const [analysisResult, setAnalysisResult] = useState(null);
 
+  // Scan Assessment Date State
+  const [scanDate, setScanDate] = useState(getEffectiveDate());
+  const [showDateCustomizer, setShowDateCustomizer] = useState(false);
+
   const fileInputRef = useRef(null);
 
   // Selected patient object
   const selectedPatient = patients.find((p) => (p.id || p.custom_id) === selectedPatientId) || initialPatient;
 
+  // Sync selected wound if patient changes
+  useEffect(() => {
+    if (selectedPatient?.wounds && selectedPatient.wounds.length > 0) {
+      if (!selectedWoundId || !selectedPatient.wounds.some((w) => w.id === selectedWoundId)) {
+        setSelectedWoundId(selectedPatient.wounds[0].id);
+      }
+    }
+  }, [selectedPatient, selectedWoundId]);
+
   // Filtered patients for dropdown
   const filteredPatients = patients.filter(
     (p) =>
       p.name.toLowerCase().includes(patientSearch.toLowerCase()) ||
-      (p.id && p.id.toLowerCase().includes(patientSearch.toLowerCase())) ||
-      (p.custom_id && p.custom_id.toLowerCase().includes(patientSearch.toLowerCase()))
+      (p.id && String(p.id).toLowerCase().includes(patientSearch.toLowerCase())) ||
+      (p.custom_id && String(p.custom_id).toLowerCase().includes(patientSearch.toLowerCase()))
   );
 
   const handlePatientSelect = (patient) => {
@@ -39,6 +80,9 @@ export const AIAnalysisWizard = ({
     setSelectedPatientId(pId);
     setPatientSearch(patient.name);
     setShowPatientDropdown(false);
+    if (patient.wounds && patient.wounds.length > 0) {
+      setSelectedWoundId(patient.wounds[0].id);
+    }
     setCurrentStep(2);
   };
 
@@ -51,6 +95,33 @@ export const AIAnalysisWizard = ({
       };
       reader.readAsDataURL(file);
     }
+  };
+
+  // Quick Date Shift helpers for this scan
+  const handleShiftDate = (days) => {
+    const next = new Date(scanDate);
+    next.setDate(next.getDate() + days);
+    setScanDate(next);
+  };
+
+  const handleSetCustomDate = (dateStr) => {
+    if (!dateStr) return;
+    const [year, month, day] = dateStr.split("-").map(Number);
+    const updated = new Date(scanDate);
+    updated.setFullYear(year, month - 1, day);
+    setScanDate(updated);
+  };
+
+  const handleSetCustomTime = (timeStr) => {
+    if (!timeStr) return;
+    const [hours, minutes] = timeStr.split(":").map(Number);
+    const updated = new Date(scanDate);
+    updated.setHours(hours || 0, minutes || 0, 0);
+    setScanDate(updated);
+  };
+
+  const handleResetToCurrentDate = () => {
+    setScanDate(getEffectiveDate());
   };
 
   // Run AI Analysis Pipeline
@@ -78,8 +149,8 @@ export const AIAnalysisWizard = ({
     // Step 4: FPN + VGG16 severity assessment
     setAnalysisStage("Stage 4/4: FPN+VGG16 Tissue Breakdown & Severity Scoring...");
 
-    // Request from API
-    const result = await api.analyzeWound(imagePreview, selectedPatient);
+    // Request from API with selected wound context
+    const result = await api.analyzeWound(imagePreview, selectedPatient, selectedWoundId);
 
     setAnalysisResult(result);
     setIsAnalyzing(false);
@@ -96,7 +167,23 @@ export const AIAnalysisWizard = ({
 
   const handleSave = () => {
     if (onSaveAndReturn && analysisResult) {
-      onSaveAndReturn(selectedPatient?.id, analysisResult, imagePreview);
+      const sim = analysisResult.pipelineResults?.similarityCheck || analysisResult.similarityCheck || {};
+      const isMismatch = (sim.isSameWound === false || sim.is_same_wound === false || (sim.similarityScore !== undefined && sim.similarityScore < 0.65) || (sim.similarity_score !== undefined && sim.similarity_score < 0.65));
+
+      if (isMismatch) {
+        const confirmSave = window.confirm(
+          `⚠️ WOUND MISMATCH DETECTED (${sim.confidence || '< 65%'})\n\nStage 1 (ResNet-50) detected that this photograph does NOT match the patient's baseline wound.\n\nAre you sure you want to log this scan to this specific wound history anyway?`
+        );
+        if (!confirmSave) return;
+      }
+
+      onSaveAndReturn(
+        selectedPatient?.id || selectedPatient?.custom_id,
+        analysisResult,
+        imagePreview,
+        scanDate,
+        selectedWoundId
+      );
     }
   };
 
@@ -165,6 +252,161 @@ export const AIAnalysisWizard = ({
         >
           3
         </div>
+      </div>
+
+      {/* ASSESSMENT DATE CUSTOMIZER CARD */}
+      <div
+        className="app-card"
+        style={{
+          background: "#F8FAFC",
+          border: "1px solid #E2E8F0",
+          padding: "12px 14px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <Calendar size={16} color="#8B1E1E" />
+            <div>
+              <span style={{ fontSize: "0.68rem", fontWeight: "700", color: "#64748B", textTransform: "uppercase", display: "block" }}>
+                Assessment Date
+              </span>
+              <strong style={{ fontSize: "0.86rem", color: "#0F172A" }}>
+                {formatDisplayDate(scanDate, true)}
+              </strong>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+            <button
+              type="button"
+              onClick={() => handleShiftDate(1)}
+              style={{
+                background: "#FFFFFF",
+                border: "1px solid #CBD5E1",
+                borderRadius: "6px",
+                padding: "4px 8px",
+                fontSize: "0.72rem",
+                fontWeight: "600",
+                color: "#8B1E1E",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "3px",
+              }}
+            >
+              <FastForward size={12} />
+              <span>+1d Next</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowDateCustomizer(!showDateCustomizer)}
+              style={{
+                background: showDateCustomizer ? "#FEE2E2" : "#FFFFFF",
+                border: "1px solid #CBD5E1",
+                borderRadius: "6px",
+                padding: "4px 8px",
+                fontSize: "0.72rem",
+                fontWeight: "600",
+                color: "#334155",
+                cursor: "pointer",
+              }}
+            >
+              {showDateCustomizer ? "Close" : "Change ▾"}
+            </button>
+          </div>
+        </div>
+
+        {showDateCustomizer && (
+          <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: "1px solid #E2E8F0" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" }}>
+              <div>
+                <label style={{ fontSize: "0.7rem", color: "#64748B", fontWeight: "600", display: "block", marginBottom: "2px" }}>
+                  Date
+                </label>
+                <input
+                  type="date"
+                  value={formatDateInput(scanDate)}
+                  onChange={(e) => handleSetCustomDate(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "6px 8px",
+                    borderRadius: "6px",
+                    border: "1px solid #CBD5E1",
+                    fontSize: "0.78rem",
+                    background: "#FFFFFF",
+                  }}
+                />
+              </div>
+              <div>
+                <label style={{ fontSize: "0.7rem", color: "#64748B", fontWeight: "600", display: "block", marginBottom: "2px" }}>
+                  Time
+                </label>
+                <input
+                  type="time"
+                  value={formatTimeInput(scanDate)}
+                  onChange={(e) => handleSetCustomTime(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "6px 8px",
+                    borderRadius: "6px",
+                    border: "1px solid #CBD5E1",
+                    fontSize: "0.78rem",
+                    background: "#FFFFFF",
+                  }}
+                />
+              </div>
+            </div>
+
+            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={handleResetToCurrentDate}
+                style={{
+                  background: "#FFFFFF",
+                  border: "1px solid #CBD5E1",
+                  borderRadius: "6px",
+                  padding: "4px 8px",
+                  fontSize: "0.72rem",
+                  color: "#64748B",
+                  cursor: "pointer",
+                }}
+              >
+                Reset to Current
+              </button>
+              <button
+                type="button"
+                onClick={() => handleShiftDate(3)}
+                style={{
+                  background: "#FFFFFF",
+                  border: "1px solid #CBD5E1",
+                  borderRadius: "6px",
+                  padding: "4px 8px",
+                  fontSize: "0.72rem",
+                  color: "#0F172A",
+                  cursor: "pointer",
+                }}
+              >
+                +3 Days
+              </button>
+              <button
+                type="button"
+                onClick={() => handleShiftDate(7)}
+                style={{
+                  background: "#FFFFFF",
+                  border: "1px solid #CBD5E1",
+                  borderRadius: "6px",
+                  padding: "4px 8px",
+                  fontSize: "0.72rem",
+                  color: "#0F172A",
+                  cursor: "pointer",
+                }}
+              >
+                +1 Week
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* STEP 1: SELECT PATIENT */}
@@ -281,6 +523,139 @@ export const AIAnalysisWizard = ({
         )}
       </div>
 
+      {/* TARGET WOUND SITE SELECTOR */}
+      {selectedPatient && (
+        <div
+          className="app-card"
+          style={{
+            background: "#FFFBF7",
+            border: "1.5px solid #FED7AA",
+            padding: "14px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+              <MapPin size={16} color="#C2410C" />
+              <span style={{ fontSize: "0.74rem", fontWeight: "800", color: "#9A3412", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+                Target Wound Site
+              </span>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setIsAddingWoundInWizard(!isAddingWoundInWizard)}
+              style={{
+                background: isAddingWoundInWizard ? "#FED7AA" : "#FFFFFF",
+                border: "1px solid #FDBA74",
+                borderRadius: "6px",
+                padding: "3px 8px",
+                fontSize: "0.7rem",
+                fontWeight: "700",
+                color: "#C2410C",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "3px",
+              }}
+            >
+              <Plus size={12} />
+              <span>{isAddingWoundInWizard ? "Cancel" : "+ Add Wound Site"}</span>
+            </button>
+          </div>
+
+          {/* Inline Add Wound Form */}
+          {isAddingWoundInWizard && (
+            <div style={{ background: "#FFFFFF", border: "1px solid #FED7AA", borderRadius: "10px", padding: "10px", marginBottom: "10px" }}>
+              <div style={{ marginBottom: "8px" }}>
+                <label style={{ display: "block", fontSize: "0.7rem", fontWeight: "700", color: "#475569", marginBottom: "2px" }}>
+                  Anatomical Location *
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Sacrum, Right Knee, Left Heel"
+                  value={wizardNewWound.anatomicalLocation}
+                  onChange={(e) => setWizardNewWound({ ...wizardNewWound, anatomicalLocation: e.target.value })}
+                  style={{ width: "100%", padding: "7px 10px", borderRadius: "6px", border: "1px solid #CBD5E1", fontSize: "0.78rem" }}
+                />
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+                <span style={{ fontSize: "0.7rem", color: "#166534" }}>
+                  ✨ AI will automatically classify the wound type upon scanning.
+                </span>
+                <button
+                  type="button"
+                  disabled={isSavingWoundInWizard || !wizardNewWound.anatomicalLocation.trim()}
+                  onClick={async () => {
+                    setIsSavingWoundInWizard(true);
+                    const pId = selectedPatient.id || selectedPatient.custom_id;
+                    const res = await api.addWoundToPatient(pId, {
+                      ...wizardNewWound,
+                      woundType: "Pending AI Scan",
+                      label: wizardNewWound.label || wizardNewWound.anatomicalLocation,
+                    });
+                    if (res && res.wounds) {
+                      const latestWound = res.wounds[res.wounds.length - 1];
+                      if (latestWound) setSelectedWoundId(latestWound.id);
+                    }
+                    setIsSavingWoundInWizard(false);
+                    setIsAddingWoundInWizard(false);
+                    setWizardNewWound({ anatomicalLocation: "", woundType: "Pending AI Scan", label: "" });
+                  }}
+                  style={{
+                    background: "#8B1E1E",
+                    color: "#FFFFFF",
+                    border: "none",
+                    borderRadius: "6px",
+                    padding: "5px 12px",
+                    fontSize: "0.75rem",
+                    fontWeight: "700",
+                    cursor: "pointer",
+                  }}
+                >
+                  {isSavingWoundInWizard ? "Saving..." : "Create & Select Wound"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Wound Dropdown Selector */}
+          {selectedPatient.wounds && selectedPatient.wounds.length > 0 ? (
+            <div>
+              <select
+                value={selectedWoundId || (selectedPatient.wounds[0]?.id ?? "")}
+                onChange={(e) => setSelectedWoundId(Number(e.target.value) || e.target.value)}
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  borderRadius: "10px",
+                  border: "1.5px solid #FDBA74",
+                  fontSize: "0.86rem",
+                  fontWeight: "700",
+                  color: "#7C2D12",
+                  background: "#FFFFFF",
+                  outline: "none",
+                  cursor: "pointer",
+                }}
+              >
+                {selectedPatient.wounds.map((w, idx) => (
+                  <option key={w.id || idx} value={w.id}>
+                    {w.label || w.anatomical_location || `Wound Site #${idx + 1}`} ({w.wound_type})
+                  </option>
+                ))}
+              </select>
+              <span style={{ fontSize: "0.72rem", color: "#9A3412", display: "block", marginTop: "4px" }}>
+                AI assessment metrics and tissue progress will be logged under this specific wound.
+              </span>
+            </div>
+          ) : (
+            <div style={{ fontSize: "0.82rem", color: "#7C2D12" }}>
+              Scanning <strong>{selectedPatient.anatomicalLocation || "Lower Extremity"}</strong> ({selectedPatient.woundType || "Primary Wound"})
+            </div>
+          )}
+        </div>
+      )}
+
       {/* STEP 2: UPLOAD PICTURE */}
       <div className="app-card">
         <h3 style={{ fontSize: "1.15rem", fontWeight: "800", color: "#0F172A", marginBottom: "12px" }}>
@@ -337,7 +712,7 @@ export const AIAnalysisWizard = ({
                 Tap to take a photo or choose file
               </strong>
               <p style={{ fontSize: "0.78rem", color: "#64748B", marginTop: "4px" }}>
-                Use your device camera for best results
+                Use device camera or upload an image from files
               </p>
             </>
           )}
@@ -421,6 +796,90 @@ export const AIAnalysisWizard = ({
 
         {!isAnalyzing && analysisResult && (
           <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+
+            {/* STAGE 1 RESNET-50 SIMILARITY CHECK BANNER */}
+            {(() => {
+              const sim = analysisResult.pipelineResults?.similarityCheck || analysisResult.similarityCheck || {};
+              const isMismatch = (sim.isSameWound === false || sim.is_same_wound === false || (sim.similarityScore !== undefined && sim.similarityScore < 0.65) || (sim.similarity_score !== undefined && sim.similarity_score < 0.65));
+              const isBaseline = sim.isBaseline || sim.is_baseline;
+
+              if (isMismatch) {
+                return (
+                  <div
+                    style={{
+                      background: "#FEF2F2",
+                      border: "2px solid #EF4444",
+                      borderRadius: "14px",
+                      padding: "14px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "8px",
+                      boxShadow: "0 4px 12px rgba(239, 68, 68, 0.15)",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <AlertTriangle size={20} color="#DC2626" />
+                      <strong style={{ fontSize: "0.88rem", color: "#991B1B" }}>
+                        ⚠️ WOUND MISMATCH DETECTED (Stage 1: ResNet-50)
+                      </strong>
+                    </div>
+                    <p style={{ fontSize: "0.8rem", color: "#7F1D1D", margin: 0, lineHeight: "1.4" }}>
+                      {sim.warning || `Visual similarity with Day 1 baseline is only ${sim.confidence || "low"} (below 65% threshold). This photograph does NOT appear to be the same wound as Day 1.`}
+                    </p>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: "0.74rem", background: "#FFFFFF", padding: "6px 10px", borderRadius: "8px", border: "1px solid #FECDD3" }}>
+                      <span style={{ color: "#991B1B", fontWeight: "700" }}>Similarity Score: {sim.confidence || "< 65%"}</span>
+                      <span style={{ color: "#64748B" }}>Threshold: 65.0%</span>
+                    </div>
+                  </div>
+                );
+              }
+
+              const targetWound = selectedPatient?.wounds?.find((w) => w.id === selectedWoundId) || (selectedPatient?.wounds?.[0]);
+              const woundName = targetWound?.label || targetWound?.anatomical_location || selectedPatient?.anatomicalLocation || "Wound Site";
+
+              if (isBaseline) {
+                return (
+                  <div
+                    style={{
+                      background: "#EFF6FF",
+                      border: "1px solid #BFDBFE",
+                      borderRadius: "12px",
+                      padding: "10px 12px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                      color: "#1D4ED8",
+                      fontSize: "0.78rem",
+                      fontWeight: "600",
+                    }}
+                  >
+                    <CheckCircle2 size={16} color="#2563EB" />
+                    <span>Stage 1 (ResNet-50): <strong>Day 1 Baseline Established for {woundName}</strong> (First scan reference for future follow-ups).</span>
+                  </div>
+                );
+              }
+
+              return (
+                <div
+                  style={{
+                    background: "#F0FDF4",
+                    border: "1px solid #BBF7D0",
+                    borderRadius: "12px",
+                    padding: "10px 12px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "8px",
+                    color: "#166534",
+                    fontSize: "0.78rem",
+                    fontWeight: "600",
+                  }}
+                >
+                  <CheckCircle2 size={16} color="#16A34A" />
+                  <span>Stage 1 (ResNet-50): <strong>Match Confirmed ({sim.confidence})</strong> with {woundName} Day 1 baseline.</span>
+                </div>
+              );
+            })()}
+
             {/* Severity Gauge */}
             <div style={{ display: "flex", justifyContent: "center", padding: "8px 0" }}>
               <CircularGauge
@@ -504,6 +963,13 @@ export const AIAnalysisWizard = ({
               </p>
             </div>
 
+            {/* Scan Timestamp Confirmation */}
+            <div style={{ textAlign: "center", padding: "2px 0" }}>
+              <span style={{ fontSize: "0.74rem", color: "#64748B" }}>
+                Logging scan as: <strong style={{ color: "#0F172A" }}>{formatDisplayDate(scanDate, true)}</strong>
+              </span>
+            </div>
+
             {/* Action Buttons */}
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginTop: "4px" }}>
               <button
@@ -512,7 +978,7 @@ export const AIAnalysisWizard = ({
                 className="btn-secondary"
                 style={{ fontSize: "0.85rem", padding: "12px 8px" }}
               >
-                ← Back to Dashboard
+                ← Back
               </button>
               <button
                 type="button"
@@ -520,7 +986,7 @@ export const AIAnalysisWizard = ({
                 className="btn-primary"
                 style={{ fontSize: "0.85rem", padding: "12px 8px" }}
               >
-                💾 Save & Return
+                💾 Save Assessment
               </button>
             </div>
           </div>

@@ -1,5 +1,91 @@
+from django.contrib.auth.models import User
+from django.contrib.auth import authenticate
 from rest_framework import serializers
 from .models import Patient, WoundProfile, WoundAssessmentScan, TreatmentGuideline
+
+
+class UserSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    role = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'full_name', 'role', 'date_joined']
+        read_only_fields = ['id', 'date_joined']
+
+    def get_full_name(self, obj):
+        name = f"{obj.first_name} {obj.last_name}".strip()
+        return name if name else obj.username
+
+    def get_role(self, obj):
+        # We can store role or title in last_name prefix or return clinician default
+        if obj.is_superuser:
+            return "Lead Administrator"
+        if obj.is_staff:
+            return "Lead Physician"
+        return "Clinician"
+
+
+class RegisterSerializer(serializers.Serializer):
+    username = serializers.CharField(max_length=150, required=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
+    password = serializers.CharField(write_only=True, required=True, min_length=6)
+    full_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    role = serializers.CharField(max_length=100, required=False, allow_blank=True)
+
+    def validate_username(self, value):
+        if User.objects.filter(username__iexact=value).exists():
+            raise serializers.ValidationError("A user with this username already exists.")
+        return value
+
+    def create(self, validated_data):
+        username = validated_data['username']
+        email = validated_data.get('email', '')
+        password = validated_data['password']
+        full_name = validated_data.get('full_name', '').strip()
+
+        first_name = full_name
+        last_name = ""
+        if " " in full_name:
+            parts = full_name.split(" ", 1)
+            first_name = parts[0]
+            last_name = parts[1]
+
+        user = User.objects.create_user(
+            username=username,
+            email=email,
+            password=password,
+            first_name=first_name,
+            last_name=last_name
+        )
+        return user
+
+
+class LoginSerializer(serializers.Serializer):
+    username = serializers.CharField(required=True)
+    password = serializers.CharField(write_only=True, required=True)
+
+    def validate(self, data):
+        username_or_email = data.get('username')
+        password = data.get('password')
+
+        user = authenticate(username=username_or_email, password=password)
+        if not user:
+            # Try matching by email if username doesn't directly authenticate
+            try:
+                user_obj = User.objects.get(email__iexact=username_or_email)
+                user = authenticate(username=user_obj.username, password=password)
+            except (User.DoesNotExist, User.MultipleObjectsReturned):
+                pass
+
+        if not user:
+            raise serializers.ValidationError("Invalid credentials. Please check your username/email and password.")
+
+        if not user.is_active:
+            raise serializers.ValidationError("This account is currently disabled.")
+
+        data['user'] = user
+        return data
 
 class WoundAssessmentScanSerializer(serializers.ModelSerializer):
     tissue_stats = serializers.SerializerMethodField()
@@ -24,13 +110,35 @@ class WoundAssessmentScanSerializer(serializers.ModelSerializer):
 
 
 class WoundProfileSerializer(serializers.ModelSerializer):
+    scans = WoundAssessmentScanSerializer(many=True, read_only=True)
+    trend_data = serializers.SerializerMethodField()
+
     class Meta:
         model = WoundProfile
-        fields = '__all__'
+        fields = [
+            'id', 'patient', 'label', 'wound_type', 'anatomical_location',
+            'status', 'status_type', 'last_updated', 'current_severity',
+            'current_severity_label', 'healing_status', 'ai_recommendation',
+            'created_at', 'scans', 'trend_data'
+        ]
+
+    def get_trend_data(self, obj):
+        scans = obj.scans.all().order_by('scan_date')
+        if not scans.exists():
+            return []
+        
+        trend = []
+        for idx, scan in enumerate(scans):
+            trend.append({
+                "week": f"Scan {idx + 1}",
+                "score": scan.severity_score,
+            })
+        return trend
 
 
 class PatientSerializer(serializers.ModelSerializer):
-    wound_profile = WoundProfileSerializer(read_only=True)
+    wounds = WoundProfileSerializer(many=True, read_only=True)
+    wound_profile = serializers.SerializerMethodField()
     scans = WoundAssessmentScanSerializer(many=True, read_only=True)
     trend_data = serializers.SerializerMethodField()
     # Flattened convenience properties for frontend matching
@@ -50,38 +158,56 @@ class PatientSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'custom_id', 'name', 'age', 'gender', 'address', 'phone',
             'emergency_contact', 'notes', 'allergies', 'created_at', 'updated_at',
-            'wound_profile', 'scans', 'trend_data',
+            'wounds', 'wound_profile', 'scans', 'trend_data',
             'woundType', 'anatomicalLocation', 'status', 'statusType',
             'lastUpdated', 'currentSeverity', 'currentSeverityLabel',
             'healingStatus', 'aiRecommendation'
         ]
 
+    def get_primary_wound(self, obj):
+        return obj.wounds.first()
+
+    def get_wound_profile(self, obj):
+        pw = self.get_primary_wound(obj)
+        if pw:
+            return WoundProfileSerializer(pw).data
+        return None
+
     def get_woundType(self, obj):
-        return obj.wound_profile.wound_type if hasattr(obj, 'wound_profile') else 'Diabetic Wound'
+        pw = self.get_primary_wound(obj)
+        return pw.wound_type if pw else 'Diabetic Wound'
 
     def get_anatomicalLocation(self, obj):
-        return obj.wound_profile.anatomical_location if hasattr(obj, 'wound_profile') else 'Lower Extremity'
+        pw = self.get_primary_wound(obj)
+        return pw.anatomical_location if pw else 'Lower Extremity'
 
     def get_status(self, obj):
-        return obj.wound_profile.status if hasattr(obj, 'wound_profile') else 'AWAITING SCAN'
+        pw = self.get_primary_wound(obj)
+        return pw.status if pw else 'AWAITING SCAN'
 
     def get_statusType(self, obj):
-        return obj.wound_profile.status_type if hasattr(obj, 'wound_profile') else 'warning'
+        pw = self.get_primary_wound(obj)
+        return pw.status_type if pw else 'warning'
 
     def get_lastUpdated(self, obj):
-        return obj.wound_profile.last_updated if hasattr(obj, 'wound_profile') else 'Just now'
+        pw = self.get_primary_wound(obj)
+        return pw.last_updated if pw else 'Just now'
 
     def get_currentSeverity(self, obj):
-        return obj.wound_profile.current_severity if hasattr(obj, 'wound_profile') else None
+        pw = self.get_primary_wound(obj)
+        return pw.current_severity if pw else None
 
     def get_currentSeverityLabel(self, obj):
-        return obj.wound_profile.current_severity_label if hasattr(obj, 'wound_profile') else 'Awaiting Scan'
+        pw = self.get_primary_wound(obj)
+        return pw.current_severity_label if pw else 'Awaiting Scan'
 
     def get_healingStatus(self, obj):
-        return obj.wound_profile.healing_status if hasattr(obj, 'wound_profile') else 'Not Assessed'
+        pw = self.get_primary_wound(obj)
+        return pw.healing_status if pw else 'Not Assessed'
 
     def get_aiRecommendation(self, obj):
-        return obj.wound_profile.ai_recommendation if hasattr(obj, 'wound_profile') else 'New patient profile registered. Capture or upload a wound image to run AI segmentation and severity scoring.'
+        pw = self.get_primary_wound(obj)
+        return pw.ai_recommendation if pw else 'New patient profile registered. Capture or upload a wound image to run AI segmentation and severity scoring.'
 
     def get_trend_data(self, obj):
         scans = obj.scans.all().order_by('scan_date')
