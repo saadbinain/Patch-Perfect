@@ -11,7 +11,6 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
     emergencyContact: "",
     notes: "",
     allergies: "None",
-    woundType: "Diabetic Wound",
     anatomicalLocation: "Lower Extremity",
   });
 
@@ -59,13 +58,7 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
     "Sacral / Coccyx",
     "Abdomen",
     "Upper Extremity",
-  ];
-
-  const commonWoundTypes = [
-    "Diabetic Wound",
-    "Pressure Injury",
-    "Venous Ulcer",
-    "Surgical Wound",
+    "Head / Scalp",
   ];
 
   return (
@@ -204,7 +197,7 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
             </div>
           </div>
 
-          {/* Primary Wound Type & Anatomical Location */}
+          {/* Primary wound site (the wound TYPE is identified by the AI on the first scan) */}
           <div style={{ background: "#F8FAFC", padding: "12px", borderRadius: "14px", border: "1px solid #E2E8F0" }}>
             <span style={{ fontSize: "0.74rem", fontWeight: "800", color: "#0F172A", textTransform: "uppercase", letterSpacing: "0.04em", display: "flex", alignItems: "center", gap: "5px", marginBottom: "8px" }}>
               <HeartPulse size={14} color="#8B1E1E" />
@@ -212,33 +205,6 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
             </span>
 
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              <div>
-                <label style={{ display: "block", fontSize: "0.74rem", fontWeight: "700", color: "#475569", marginBottom: "4px" }}>
-                  Wound Category
-                </label>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
-                  {commonWoundTypes.map((wt) => (
-                    <button
-                      key={wt}
-                      type="button"
-                      onClick={() => setFormData((p) => ({ ...p, woundType: wt }))}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "8px",
-                        fontSize: "0.74rem",
-                        fontWeight: "600",
-                        border: formData.woundType === wt ? "1.5px solid #8B1E1E" : "1px solid #CBD5E1",
-                        background: formData.woundType === wt ? "#FFFFFF" : "#F1F5F9",
-                        color: formData.woundType === wt ? "#8B1E1E" : "#475569",
-                        cursor: "pointer",
-                      }}
-                    >
-                      {wt}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
               <div>
                 <label style={{ display: "block", fontSize: "0.74rem", fontWeight: "700", color: "#475569", marginBottom: "4px" }}>
                   Anatomical Site
@@ -264,6 +230,9 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
                     </button>
                   ))}
                 </div>
+                <p style={{ fontSize: "0.72rem", color: "#64748B", marginTop: "8px", lineHeight: 1.4 }}>
+                  The wound type is identified by the AI from the first scan and stays the same for this wound.
+                </p>
               </div>
             </div>
           </div>

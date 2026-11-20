@@ -186,6 +186,49 @@ class ScanSaveTests(ApiTestCase):
         self.assertEqual(wound["current_severity"], 4)
 
 
+class WoundTypeLockTests(ApiTestCase):
+    """The AI identifies the type on the first scan; it then stays for every later scan."""
+
+    save_scan = ScanSaveTests.save_scan
+
+    def test_registration_ignores_client_wound_type(self):
+        p = self.create_patient(woundType="Diabetic Wound")
+        self.assertEqual(p["wounds"][0]["wound_type"], "Pending AI Scan")
+
+    def test_first_scan_sets_type_and_later_scans_keep_it(self):
+        p = self.create_patient()
+        self.save_scan(p, wound_type="Pressure Injury")
+        res = self.save_scan(p, wound_type="Venous Ulcer")
+        self.assertEqual(res.json()["wound_type"], "Pressure Injury")
+        wound = self.client.get(f"/api/patients/{p['custom_id']}/").json()["wounds"][0]
+        self.assertEqual(wound["wound_type"], "Pressure Injury")
+        self.assertEqual({s["wound_type"] for s in wound["scans"]}, {"Pressure Injury"})
+
+    def test_unclassified_first_scan_lets_next_scan_set_type(self):
+        p = self.create_patient()
+        self.save_scan(p, wound_type="Unclassified")
+        self.save_scan(p, wound_type="Surgical Wound")
+        wound = self.client.get(f"/api/patients/{p['custom_id']}/").json()["wounds"][0]
+        self.assertEqual(wound["wound_type"], "Surgical Wound")
+
+    @mock.patch("api.views.run_ai_inference_pipeline")
+    def test_analyze_reports_the_locked_type(self, run):
+        p = self.create_patient()
+        self.save_scan(p, wound_type="Pressure Injury")
+        run.return_value = {**FAKE_RESULT, "wound_type": "Venous Ulcer", "warnings": []}
+        res = self.client.post("/api/scans/analyze/", {"patient_id": p["custom_id"], "image_base64": image_data_url()}, format="json").json()
+        self.assertEqual(res["wound_type"], "Pressure Injury")
+        self.assertTrue(res["wound_type_locked"])
+
+    @mock.patch("api.views.run_ai_inference_pipeline")
+    def test_first_analyze_is_not_locked(self, run):
+        p = self.create_patient()
+        run.return_value = {**FAKE_RESULT, "wound_type": "Venous Ulcer", "warnings": []}
+        res = self.client.post("/api/scans/analyze/", {"patient_id": p["custom_id"], "image_base64": image_data_url()}, format="json").json()
+        self.assertEqual(res["wound_type"], "Venous Ulcer")
+        self.assertFalse(res["wound_type_locked"])
+
+
 class SeverityAnalyzerTests(unittest.TestCase):
     def test_background_outside_mask_is_ignored(self):
         img = np.zeros((100, 100, 3), dtype=np.uint8)  # black = "necrotic" colour everywhere

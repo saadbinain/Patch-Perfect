@@ -27,6 +27,13 @@ from .serializers import (
 from .ai_pipeline import run_ai_inference_pipeline, pipeline_status
 
 PENDING_TYPE = "Pending AI Scan"
+# A wound's type is identified by the AI on its first scan and then kept for every
+# later scan. Until then it holds one of these placeholders.
+UNSET_TYPES = {"", PENDING_TYPE, "Unclassified"}
+
+
+def wound_type_is_set(wound_profile):
+    return bool(wound_profile) and (wound_profile.wound_type or "") not in UNSET_TYPES
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +174,7 @@ class PatientViewSet(viewsets.ModelViewSet):
             return Response({"age": ["Age must be a number."]}, status=status.HTTP_400_BAD_REQUEST)
 
         anatomical_location = data.get('anatomicalLocation') or 'Lower Extremity'
-        wound_type = data.get('woundType') or PENDING_TYPE
+        wound_type = PENDING_TYPE  # identified by the AI on the first scan, not chosen at registration
         try:
             with transaction.atomic():
                 patient = Patient.objects.create(
@@ -210,7 +217,7 @@ class PatientViewSet(viewsets.ModelViewSet):
         WoundProfile.objects.create(
             patient=patient,
             label=data.get('label') or data.get('woundLabel') or anatomical_location,
-            wound_type=data.get('wound_type') or data.get('woundType') or PENDING_TYPE,
+            wound_type=PENDING_TYPE,
             anatomical_location=anatomical_location,
             status='AWAITING SCAN',
             status_type='warning',
@@ -274,6 +281,15 @@ class AnalyzeWoundAPIView(APIView):
         except ValueError as e:
             # unusable photo (no wound found, unreadable image): tell the user, don't guess
             return Response({"detail": str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        # The type set by this wound's first scan stays; the per-photo prediction is
+        # kept in pipeline_metrics.classification for reference only.
+        if wound_type_is_set(wound_profile):
+            result["wound_type"] = wound_profile.wound_type
+            result["wound_type_locked"] = True
+            result["warnings"] = [w for w in result.get("warnings", []) if not w.startswith("Low confidence wound type")]
+        else:
+            result["wound_type_locked"] = False
         return Response(result, status=status.HTTP_200_OK)
 
 
@@ -305,7 +321,10 @@ class WoundAssessmentScanViewSet(viewsets.ModelViewSet):
 
         severity_level = data.get('severity_level', data.get('severityLevel', 'Moderate'))
         healing_status = data.get('healing_status', data.get('healingStatus', 'Stable'))
-        wound_type = data.get('wound_type', data.get('woundType')) or wound_profile.wound_type
+        if wound_type_is_set(wound_profile):
+            wound_type = wound_profile.wound_type  # set by the first scan; never changes afterwards
+        else:
+            wound_type = data.get('wound_type', data.get('woundType')) or PENDING_TYPE
         location = data.get('anatomical_location', data.get('location')) or wound_profile.anatomical_location
         recommendation = data.get('recommendation', data.get('aiRecommendation', ''))
         tissue_stats = data.get('tissue_stats', data.get('tissueStats')) or {}

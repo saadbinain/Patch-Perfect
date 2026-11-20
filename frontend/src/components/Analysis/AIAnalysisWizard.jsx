@@ -916,7 +916,12 @@ export const AIAnalysisWizard = ({
     const healingTone = toneFor("healing", analysisResult.healingStatus);
     const typeTone = toneFor("type");
     const tiles = [
-      { label: "Wound type", value: analysisResult.woundType, tone: typeTone },
+      {
+        label: "Wound type",
+        value: analysisResult.woundType,
+        tone: typeTone,
+        note: analysisResult.woundTypeLocked ? "Set at first scan" : "Kept for this wound",
+      },
       { label: "Severity", value: analysisResult.severityLevel, tone: severityTone },
       { label: "Healing", value: analysisResult.healingStatus, tone: healingTone },
     ];
@@ -948,6 +953,11 @@ export const AIAnalysisWizard = ({
               <strong style={{ fontSize: "0.82rem", color: t.tone.text, marginTop: "2px", display: "block", overflowWrap: "anywhere" }}>
                 {t.value || "—"}
               </strong>
+              {t.note && (
+                <span style={{ fontSize: "0.6rem", color: t.tone.label, display: "block", marginTop: "2px", opacity: 0.85 }}>
+                  {t.note}
+                </span>
+              )}
             </div>
           ))}
         </div>

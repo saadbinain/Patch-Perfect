@@ -91,6 +91,10 @@ export const extractTissueStats = (scanResult) => {
   };
 };
 
+// A wound's type is set by its first scan and then kept
+const UNSET_TYPES = new Set(["", "Pending AI Scan", "Unclassified"]);
+export const woundTypeIsSet = (wound) => Boolean(wound) && !UNSET_TYPES.has(wound.wound_type || "");
+
 const statusFor = (severityScore, healingStatus) => {
   if (severityScore >= 4) return { status: "ACTION NEEDED", statusType: "danger" };
   if (healingStatus === "Deteriorating") return { status: "DETERIORATING", statusType: "warning" };
@@ -228,7 +232,8 @@ const local = {
       const woundIdx = woundProfileId ? patient.wounds.findIndex((w) => w.id === woundProfileId) : 0;
       const targetWoundIdx = woundIdx >= 0 ? woundIdx : 0;
       const targetWound = { ...patient.wounds[targetWoundIdx] };
-      targetWound.wound_type = scanResult.woundType || targetWound.wound_type;
+      if (!woundTypeIsSet(targetWound)) targetWound.wound_type = scanResult.woundType || targetWound.wound_type;
+      newScanEntry.woundType = newScanEntry.wound_type = targetWound.wound_type;
       targetWound.current_severity = scanResult.severityScore;
       targetWound.current_severity_label = scanResult.severityLevel;
       targetWound.healing_status = scanResult.healingStatus;
@@ -290,7 +295,15 @@ export const api = {
   analyzeWound: async (imageDataUrl, patient, woundProfileId = null) => {
     if (isDemo()) {
       const simulated = await simulateAIAnalysis(imageDataUrl, patient, woundProfileId);
-      return { ...simulated, simulated: true, warnings: ["Demo mode: these results are simulated, not real AI analysis."] };
+      const wound = patient?.wounds?.find((w) => w.id === woundProfileId) || patient?.wounds?.[0];
+      const locked = woundTypeIsSet(wound);
+      return {
+        ...simulated,
+        woundType: locked ? wound.wound_type : simulated.woundType,
+        woundTypeLocked: locked,
+        simulated: true,
+        warnings: ["Demo mode: these results are simulated, not real AI analysis."],
+      };
     }
 
     // The server compares against the wound's stored Day 1 scan itself.
@@ -309,6 +322,7 @@ export const api = {
       severityScore: data.severity_score,
       severityLevel: data.severity_level,
       woundType: data.wound_type,
+      woundTypeLocked: Boolean(data.wound_type_locked),
       healingStatus: data.healing_status,
       recommendation: data.recommendation,
       warnings: data.warnings || [],
