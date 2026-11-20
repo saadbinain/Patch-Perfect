@@ -10,7 +10,7 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
     phone: "",
     emergencyContact: "",
     notes: "",
-    allergies: "None",
+    allergies: "",
     anatomicalLocation: "Lower Extremity",
   });
 
@@ -267,7 +267,7 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
               <input
                 type="text"
                 name="allergies"
-                placeholder="e.g. Latex, Iodine"
+                placeholder="e.g. Latex, Iodine, or None known"
                 value={formData.allergies}
                 onChange={handleChange}
                 style={{

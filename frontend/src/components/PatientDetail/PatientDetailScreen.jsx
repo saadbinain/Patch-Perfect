@@ -23,6 +23,9 @@ import { api, extractTissueStats } from "../../services/api";
 import { getWoundLabel } from "../../services/woundLabel";
 import { resolveMediaUrl } from "../../services/apiConfig";
 
+// What a clinician types to record that the patient has no allergies.
+const NO_ALLERGY_ANSWERS = /^(none|none known|no known( drug)? allergies|nka|nkda|n\/a|no)\.?$/i;
+
 export const PatientDetailScreen = ({
   patient,
   viewingWoundId,
@@ -114,8 +117,29 @@ export const PatientDetailScreen = ({
   const day1Tissue = getTissueStats(day1Scan);
   const latestTissue = getTissueStats(latestScan);
 
+  // "Scan 2 · Day 8": the scan's number, and its real day counted from the first scan
+  // (Day 1 = date of the first scan). Without dates only the number is shown.
+  const scanTime = (scan) => {
+    const t = new Date(scan?.scan_date || scan?.date || "").getTime();
+    return Number.isNaN(t) ? null : t;
+  };
+  const scanDay = (scan) => {
+    const t0 = scanTime(day1Scan);
+    const t = scanTime(scan);
+    if (t0 == null || t == null) return null;
+    const startOf = (ms) => {
+      const d = new Date(ms);
+      return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+    };
+    return Math.round((startOf(t) - startOf(t0)) / 86400000) + 1;
+  };
   const getScanTitle = (idx) => {
-    return `Day ${idx + 1}`;
+    const day = scanDay(chronologicalScans[idx]);
+    return day ? `Scan ${idx + 1} · Day ${day}` : `Scan ${idx + 1}`;
+  };
+  const scanSize = (scan) => {
+    const cm2 = scan?.wound_area_cm2 ?? scan?.pipelineResults?.segmentation?.wound_area_cm2;
+    return typeof cm2 === "number" ? `${cm2.toFixed(1)} cm²` : null;
   };
 
   const handleSaveNewWound = async (e) => {
@@ -281,9 +305,11 @@ export const PatientDetailScreen = ({
                 >
                   <Phone size={12} /> Contact
                 </span>
-                <strong style={{ color: "#1E293B", fontSize: "0.82rem" }}>
-                  {patient.phone || "Not on file"}
-                </strong>
+                {patient.phone ? (
+                  <strong style={{ color: "#1E293B", fontSize: "0.82rem" }}>{patient.phone}</strong>
+                ) : (
+                  <span style={{ color: "#94A3B8", fontSize: "0.8rem", fontWeight: "600" }}>Not recorded</span>
+                )}
               </div>
 
               <div>
@@ -301,7 +327,9 @@ export const PatientDetailScreen = ({
                 >
                   <AlertTriangle size={12} /> Allergies
                 </span>
-                {patient.allergies && patient.allergies.toLowerCase() !== "none" && patient.allergies.trim() !== "" ? (
+                {!(patient.allergies || "").trim() ? (
+                  <span style={{ color: "#94A3B8", fontSize: "0.8rem", fontWeight: "600" }}>Not recorded</span>
+                ) : !NO_ALLERGY_ANSWERS.test(patient.allergies.trim()) ? (
                   <span
                     style={{
                       display: "inline-flex",
@@ -321,7 +349,7 @@ export const PatientDetailScreen = ({
                   </span>
                 ) : (
                   <span style={{ color: "#059669", fontSize: "0.8rem", fontWeight: "700" }}>
-                    ✓ None Reported
+                    ✓ No known allergies
                   </span>
                 )}
               </div>
@@ -341,9 +369,11 @@ export const PatientDetailScreen = ({
                 >
                   <MapPin size={12} /> Care Facility / Address
                 </span>
-                <strong style={{ color: "#334155", fontSize: "0.82rem" }}>
-                  {patient.address || "Medical Plaza Care Facility"}
-                </strong>
+                {patient.address ? (
+                  <strong style={{ color: "#334155", fontSize: "0.82rem" }}>{patient.address}</strong>
+                ) : (
+                  <span style={{ color: "#94A3B8", fontSize: "0.8rem", fontWeight: "600" }}>Not recorded</span>
+                )}
               </div>
 
               {patient.notes && (
@@ -870,7 +900,7 @@ export const PatientDetailScreen = ({
                       flexShrink: 0,
                     }}
                   >
-                    {`Day ${idx + 1}`}
+                    {`Scan ${idx + 1}`}
                   </button>
                 ))}
               </div>
@@ -1076,6 +1106,15 @@ export const PatientDetailScreen = ({
                         Severity: <strong style={{ color: "#D97706" }}>{activeScan.severity_level || activeScan.severityLevel || "Moderate"}</strong> (Score: {activeScan.severity_score || activeScan.severityScore})
                       </span>
 
+                      <span style={{ fontSize: "0.78rem", color: "#64748B", display: "block", marginTop: "3px" }}>
+                        Wound size:{" "}
+                        {scanSize(activeScan) ? (
+                          <strong style={{ color: "#0F172A" }}>{scanSize(activeScan)}</strong>
+                        ) : (
+                          <span style={{ color: "#94A3B8" }}>not measured (no colour card)</span>
+                        )}
+                      </span>
+
                       <span style={{ fontSize: "0.76rem", color: "#166534", fontWeight: "700", display: "block", marginTop: "3px" }}>
                         Healing Status: {activeScan.healing_status || activeScan.healingStatus || "Stable"}
                       </span>
@@ -1227,7 +1266,7 @@ export const PatientDetailScreen = ({
                     <div>
                       <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                         <span style={{ fontSize: "0.85rem", fontWeight: "800", color: "#1E293B" }}>
-                          Day {idx + 1}
+                          {getScanTitle(idx)}
                         </span>
                         {(scan.date || scan.scan_date_formatted) && (
                           <span style={{ fontSize: "0.74rem", color: "#64748B" }}>
@@ -1237,6 +1276,14 @@ export const PatientDetailScreen = ({
                       </div>
                       <span style={{ fontSize: "0.76rem", color: "#64748B" }}>
                         Severity: <strong style={{ color: "#D97706" }}>{scan.severity_level || scan.severityLevel || "Moderate"}</strong> (Score: {scan.severity_score || scan.severityScore})
+                      </span>
+                      <span style={{ fontSize: "0.76rem", color: "#64748B", display: "block", whiteSpace: "nowrap" }}>
+                        Size:{" "}
+                        {scanSize(scan) ? (
+                          <strong style={{ color: "#334155" }}>{scanSize(scan)}</strong>
+                        ) : (
+                          <span style={{ color: "#94A3B8" }}>not measured</span>
+                        )}
                       </span>
                     </div>
                   </div>

@@ -14,7 +14,8 @@ class Patient(models.Model):
     phone = models.CharField(max_length=50, blank=True, default="")
     emergency_contact = models.CharField(max_length=150, blank=True, default="")
     notes = models.TextField(blank=True, default="")
-    allergies = models.CharField(max_length=255, blank=True, default="None")
+    # Empty = not asked / not recorded; a clinician types "None known" to record no allergies
+    allergies = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -49,6 +50,8 @@ class WoundProfile(models.Model):
         ('STABLE', 'STABLE'),
         ('IMPROVING', 'IMPROVING'),
         ('DETERIORATING', 'DETERIORATING'),
+        ('BASELINE', 'BASELINE'),
+        ('NOT COMPARED', 'NOT COMPARED'),
     ]
 
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='wounds')

@@ -165,6 +165,16 @@ class ScanSaveTests(ApiTestCase):
         self.assertEqual(scan.wound_area_cm2, 12.5)
         self.assertEqual(scan.card_block_ratio, 0.0066)
 
+    def test_first_scan_marks_wound_as_baseline_not_stable(self):
+        p = self.create_patient()
+        self.assertEqual(self.save_scan(p).status_code, 201)
+        wound = WoundAssessmentScan.objects.get().wound_profile
+        self.assertEqual(wound.status, "BASELINE")
+
+    def test_new_patient_allergies_are_not_recorded_by_default(self):
+        p = self.create_patient()
+        self.assertEqual(Patient.objects.get(custom_id=p["custom_id"]).allergies, "")
+
     def test_photo_saved_as_file_and_list_has_no_base64(self):
         p = self.create_patient()
         res = self.save_scan(p)

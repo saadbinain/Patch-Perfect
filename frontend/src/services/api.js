@@ -101,6 +101,8 @@ const statusFor = (severityScore, healingStatus) => {
   if (severityScore >= 4) return { status: "ACTION NEEDED", statusType: "danger" };
   if (healingStatus === "Deteriorating") return { status: "DETERIORATING", statusType: "warning" };
   if (healingStatus === "Improving") return { status: "IMPROVING", statusType: "success" };
+  if (healingStatus === "Baseline") return { status: "BASELINE", statusType: "info" };
+  if (healingStatus === "Not compared") return { status: "NOT COMPARED", statusType: "warning" };
   return { status: "STABLE", statusType: "info" };
 };
 
@@ -144,7 +146,7 @@ const local = {
       address: patientData.address || "Local Clinic",
       phone: patientData.phone || "N/A",
       emergency_contact: patientData.emergencyContact || "N/A",
-      allergies: patientData.allergies || "None",
+      allergies: patientData.allergies || "",
       notes: patientData.notes || "",
       woundType,
       anatomicalLocation,

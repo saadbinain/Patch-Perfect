@@ -70,6 +70,10 @@ def _wound_status(severity_score, healing_status):
         return "DETERIORATING", "warning"
     if healing_status == "Improving":
         return "IMPROVING", "success"
+    if healing_status == "Baseline":
+        return "BASELINE", "info"
+    if healing_status == "Not compared":
+        return "NOT COMPARED", "warning"
     return "STABLE", "info"
 
 
@@ -187,7 +191,7 @@ class PatientViewSet(viewsets.ModelViewSet):
                     phone=data.get('phone', ''),
                     emergency_contact=data.get('emergencyContact', data.get('emergency_contact', '')),
                     notes=data.get('notes', ''),
-                    allergies=data.get('allergies', 'None'),
+                    allergies=(data.get('allergies') or '').strip(),
                 )
                 WoundProfile.objects.create(
                     patient=patient,
