@@ -157,6 +157,14 @@ class ScanSaveTests(ApiTestCase):
         }
         return self.client.post("/api/scans/", body, format="json")
 
+    def test_card_measurements_are_saved(self):
+        p = self.create_patient()
+        res = self.save_scan(p, wound_area_cm2=12.5, card_block_ratio=0.0066)
+        self.assertEqual(res.status_code, 201, res.content)
+        scan = WoundAssessmentScan.objects.get()
+        self.assertEqual(scan.wound_area_cm2, 12.5)
+        self.assertEqual(scan.card_block_ratio, 0.0066)
+
     def test_photo_saved_as_file_and_list_has_no_base64(self):
         p = self.create_patient()
         res = self.save_scan(p)
@@ -329,3 +337,209 @@ class PipelineLoadingTests(unittest.TestCase):
         manager.load_errors = {}
         model = manager._load_strict("FUSegNet", pipeline_loader.build_fusegnet, pipeline_loader.WEIGHTS_DIR / "fusegnet_segmentation.pth")
         self.assertIsNotNone(model, manager.load_errors)
+
+
+class CropStepTests(ApiTestCase):
+    @mock.patch("api.views.detect_wound_box")
+    def test_detect_box_endpoint(self, detect_mock):
+        detect_mock.return_value = {
+            "bounding_box": [10, 20, 100, 200],
+            "normalized_box": [0.1, 0.2, 0.5, 0.8],
+            "wound_detected": True,
+            "image_width": 200,
+            "image_height": 250,
+            "wound_area_ratio": 0.05,
+        }
+        res = self.client.post("/api/scans/detect-box/", {"image_base64": image_data_url()}, format="json")
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(res.json()["wound_detected"])
+        self.assertEqual(res.json()["bounding_box"], [10, 20, 100, 200])
+
+    @mock.patch("api.views.run_ai_inference_pipeline")
+    def test_analyze_passes_crop_box(self, run_mock):
+        p = self.create_patient()
+        run_mock.return_value = {**FAKE_RESULT, "wound_type": "Diabetic Ulcer", "warnings": []}
+        crop = [15, 25, 120, 180]
+        res = self.client.post("/api/scans/analyze/", {
+            "patient_id": p["custom_id"],
+            "image_base64": image_data_url(),
+            "crop_box": crop,
+        }, format="json")
+        self.assertEqual(res.status_code, 200)
+        run_mock.assert_called_once()
+        self.assertEqual(run_mock.call_args.kwargs.get("crop_box"), crop)
+
+    def test_parse_crop_box_formats(self):
+        from ai_models.pipeline_loader import _parse_crop_box
+        # normalized [0..1]
+        self.assertEqual(_parse_crop_box([0.1, 0.2, 0.6, 0.8], 1000, 500), (100, 100, 600, 400))
+        # pixel coords
+        self.assertEqual(_parse_crop_box([50, 60, 200, 300], 1000, 500), (50, 60, 200, 300))
+        # dictionary
+        self.assertEqual(_parse_crop_box({"x1": 10, "y1": 20, "x2": 150, "y2": 250}, 1000, 500), (10, 20, 150, 250))
+        # reversed coordinates sorted properly
+        self.assertEqual(_parse_crop_box([200, 300, 50, 60], 1000, 500), (50, 60, 200, 300))
+        # None / invalid
+        self.assertIsNone(_parse_crop_box(None, 1000, 500))
+        self.assertIsNone(_parse_crop_box("invalid", 1000, 500))
+
+
+class CropPipelineTests(unittest.TestCase):
+    """Runs the real run_inference with the models stubbed, so the crop logic itself is tested."""
+
+    def manager_with_mask(self, mask):
+        manager = pipeline_loader.AIPipelineManager.__new__(pipeline_loader.AIPipelineManager)
+        manager.fusegnet_model = object()  # "loaded"
+        manager.vgg_classifier = None
+        manager.load_errors = {}
+        manager.load_models = lambda: None
+        manager._check_similarity = lambda *a, **k: {"is_baseline": True}
+        bbox = None
+        if mask is not None and mask.any():
+            ys, xs = np.nonzero(mask)
+            bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+        manager._segment = lambda img: (mask, bbox, float(mask.mean()) if mask is not None else None)
+        return manager
+
+    @staticmethod
+    def wound_photo():
+        # 512x512 skin-coloured photo with a red 64x64 wound in the middle
+        img = Image.new("RGB", (512, 512), (225, 190, 170))
+        img.paste((190, 30, 40), (224, 224, 288, 288))
+        return img
+
+    @staticmethod
+    def wound_mask():
+        mask = np.zeros((512, 512), dtype=np.uint8)
+        mask[224:288, 224:288] = 1
+        return mask
+
+    def area(self, crop_box):
+        result = self.manager_with_mask(self.wound_mask()).run_inference(self.wound_photo(), crop_box=crop_box)
+        return result["pipeline_metrics"]["segmentation"]["wound_area_ratio"]
+
+    def test_tight_and_loose_crops_give_the_same_area(self):
+        # A tighter box must not make the wound look bigger (false "Deteriorating").
+        expected = round(64 * 64 / (512 * 512), 5)
+        self.assertEqual(self.area(None), expected)
+        self.assertEqual(self.area([0.1, 0.1, 0.9, 0.9]), expected)
+        self.assertEqual(self.area([0.42, 0.42, 0.58, 0.58]), expected)
+
+    def test_false_detections_outside_the_box_are_excluded(self):
+        mask = self.wound_mask()
+        mask[0:40, 0:200] = 1  # e.g. hair / forehead wrongly segmented
+        manager = self.manager_with_mask(mask)
+        result = manager.run_inference(self.wound_photo(), crop_box=[0.4, 0.4, 0.6, 0.6])
+        seg = result["pipeline_metrics"]["segmentation"]
+        self.assertTrue(seg["crop_box_applied"])
+        self.assertEqual(seg["wound_area_ratio"], round(64 * 64 / (512 * 512), 5))
+
+    def test_slough_hole_inside_the_wound_counts_toward_size(self):
+        mask = self.wound_mask()
+        mask[240:272, 240:272] = 0  # segmenter left the yellow slough centre out
+        result = self.manager_with_mask(mask).run_inference(self.wound_photo(), crop_box=[0.3, 0.3, 0.7, 0.7])
+        self.assertEqual(result["pipeline_metrics"]["segmentation"]["wound_area_ratio"], round(64 * 64 / (512 * 512), 5))
+
+    def test_box_that_misses_the_wound_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "box does not contain the wound"):
+            self.manager_with_mask(self.wound_mask()).run_inference(self.wound_photo(), crop_box=[0.0, 0.0, 0.2, 0.2])
+
+    def test_no_wound_found_still_rejected_with_a_box(self):
+        # A box must not bypass the "no wound found" check and grade skin as tissue.
+        with self.assertRaisesRegex(ValueError, "No wound was detected"):
+            self.manager_with_mask(None).run_inference(self.wound_photo(), crop_box=[0.1, 0.1, 0.9, 0.9])
+
+    def test_exif_rotation_is_applied(self):
+        from ai_models.preprocessor import load_image_from_input
+        img = Image.new("RGB", (40, 20), (200, 0, 0))
+        exif = img.getexif()
+        exif[274] = 6  # rotate 90 degrees on display
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", exif=exif)
+        data_url = "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+        self.assertEqual(load_image_from_input(data_url).size, (20, 40))
+
+
+def card_scene(px_per_cm, size=(900, 700)):
+    """Skin-coloured photo with the colour card and a 4x3 cm red wound, drawn at a given scale.
+    The card's patches are 1 cm (the default COLOUR_CARD_PATCH_CM)."""
+    from PIL import ImageDraw
+    img = Image.new("RGB", size, (225, 190, 170))
+    d = ImageDraw.Draw(img)
+    u = px_per_cm
+    x0, y0 = 40, 40
+    d.rectangle([x0, y0, x0 + 5 * u, y0 + 5 * u], fill=(245, 245, 245))  # white card
+    grid = [[(20, 60, 200), (0, 170, 210), (30, 30, 30)],
+            [(30, 170, 60), (240, 225, 20), (110, 110, 110)],
+            [(210, 30, 30), (230, 40, 130), (190, 190, 190)]]
+    for r, row in enumerate(grid):
+        for c, colour in enumerate(row):
+            px, py = x0 + u + c * u, y0 + u + r * u
+            d.rectangle([px, py, px + u - 1, py + u - 1], fill=colour)
+    wx, wy = size[0] // 2, size[1] // 2
+    d.rectangle([wx, wy, wx + 4 * u - 1, wy + 3 * u - 1], fill=(190, 30, 40))
+    return img, (wx, wy, wx + int(4 * u), wy + int(3 * u))
+
+
+class ColourCardTests(unittest.TestCase):
+    def test_finds_card_and_scale(self):
+        from ai_models.colour_card import detect_colour_card
+        img, _ = card_scene(60)
+        card = detect_colour_card(img)
+        self.assertTrue(card["detected"])
+        self.assertAlmostEqual(card["pixels_per_cm"], 60, delta=3)
+        self.assertEqual(card["white_balance_gains"], [1.0, 1.0, 1.0])
+
+    def test_rotated_card_is_found(self):
+        from ai_models.colour_card import detect_colour_card
+        img, _ = card_scene(60)
+        card = detect_colour_card(img.rotate(30, expand=True, fillcolor=(225, 190, 170)))
+        self.assertTrue(card["detected"])
+        self.assertAlmostEqual(card["pixels_per_cm"], 60, delta=4)
+
+    def test_no_card_in_plain_wound_photo(self):
+        from ai_models.colour_card import detect_colour_card
+        self.assertFalse(detect_colour_card(CropPipelineTests.wound_photo())["detected"])
+
+    def test_white_balance_corrects_a_colour_cast(self):
+        from ai_models.colour_card import detect_colour_card, apply_white_balance
+        img, _ = card_scene(60)
+        cast = Image.fromarray(np.clip(np.asarray(img).astype(np.float32) * [1.15, 1.0, 0.85], 0, 255).astype(np.uint8))
+        card = detect_colour_card(cast)
+        fixed = np.asarray(apply_white_balance(cast, card["white_balance_gains"]))
+        white = fixed[45, 45].astype(int)  # a point on the white card
+        self.assertLess(white.max() - white.min(), 8)
+
+    def run_scene(self, px_per_cm, previous=None):
+        img, wound = card_scene(px_per_cm)
+        mask = np.zeros((512, 512), np.uint8)
+        sx, sy = 512 / img.width, 512 / img.height
+        mask[int(wound[1] * sy):int(wound[3] * sy), int(wound[0] * sx):int(wound[2] * sx)] = 1
+        manager = CropPipelineTests().manager_with_mask(mask)
+        profile = None
+        if previous is not None:
+            profile = mock.Mock()
+            profile.scans.order_by.return_value.first.return_value = previous
+            manager._baseline_scan = lambda wp: previous
+            manager._check_similarity = lambda *a, **k: {"is_baseline": False}
+        return manager.run_inference(img, wound_profile=profile, crop_box=[0.3, 0.3, 0.95, 0.95])
+
+    def test_size_in_cm2_does_not_depend_on_camera_distance(self):
+        far = self.run_scene(40)["pipeline_metrics"]["segmentation"]["wound_area_cm2"]
+        close = self.run_scene(70)["pipeline_metrics"]["segmentation"]["wound_area_cm2"]
+        self.assertAlmostEqual(far, 12.0, delta=1.0)
+        self.assertAlmostEqual(close, 12.0, delta=1.0)
+
+    def test_close_up_is_not_deteriorating_when_compared_in_cm2(self):
+        baseline = mock.Mock(wound_area_cm2=12.0, wound_area_ratio=0.02, severity_score=None,
+                             card_block_ratio=(2 * 40) ** 2 / (900 * 700))
+        result = self.run_scene(70, previous=baseline)
+        self.assertEqual(result["pipeline_metrics"]["size_basis"], "cm2")
+        self.assertEqual(result["healing_status"], "Stable")
+        self.assertTrue(any("closer than the last one" in w for w in result["warnings"]))
+
+    def test_missing_card_is_reported(self):
+        manager = CropPipelineTests().manager_with_mask(CropPipelineTests.wound_mask())
+        result = manager.run_inference(CropPipelineTests.wound_photo())
+        self.assertIsNone(result["pipeline_metrics"]["segmentation"]["wound_area_cm2"])
+        self.assertTrue(any("Colour card not found" in w for w in result["warnings"]))

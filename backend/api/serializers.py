@@ -99,7 +99,7 @@ class WoundAssessmentScanSerializer(serializers.ModelSerializer):
     class Meta:
         model = WoundAssessmentScan
         fields = [
-            'id', 'patient', 'wound_profile', 'image', 'wound_area_ratio',
+            'id', 'patient', 'wound_profile', 'image', 'wound_area_ratio', 'wound_area_cm2', 'card_block_ratio',
             'severity_score', 'severity_level', 'healing_status',
             'wound_type', 'anatomical_location', 'recommendation',
             'granulation_percent', 'slough_percent', 'necrotic_percent',

@@ -89,6 +89,10 @@ class WoundAssessmentScan(models.Model):
     necrotic_percent = models.FloatField(default=15.0)
     # Fraction of the photo covered by the FUSegNet wound mask; used for healing trend vs Day 1
     wound_area_ratio = models.FloatField(null=True, blank=True)
+    # Real wound size, scaled with the colour card; used for the healing trend when available
+    wound_area_cm2 = models.FloatField(null=True, blank=True)
+    # Share of the photo covered by the card's reference block (how close the camera was)
+    card_block_ratio = models.FloatField(null=True, blank=True)
 
     is_latest = models.BooleanField(default=True)
     scan_date = models.DateTimeField(auto_now_add=True)

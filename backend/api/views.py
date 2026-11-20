@@ -24,7 +24,7 @@ from .serializers import (
     RegisterSerializer,
     LoginSerializer,
 )
-from .ai_pipeline import run_ai_inference_pipeline, pipeline_status
+from .ai_pipeline import run_ai_inference_pipeline, detect_wound_box, pipeline_status
 
 PENDING_TYPE = "Pending AI Scan"
 # A wound's type is identified by the AI on its first scan and then kept for every
@@ -247,11 +247,11 @@ class PatientViewSet(viewsets.ModelViewSet):
 # ---------------------------------------------------------------------------
 # AI analysis
 # ---------------------------------------------------------------------------
-class AnalyzeWoundAPIView(APIView):
+class DetectWoundBoxAPIView(APIView):
     """
-    POST /api/scans/analyze/
-    Runs the AI pipeline on a wound photo. Nothing is saved; the client saves the
-    accepted result through POST /api/scans/.
+    POST /api/scans/detect-box/
+    Runs quick Stage 2 boundary detection to return the initial AI bounding box.
+    The clinician can adjust or accept this box prior to full analysis.
     """
     permission_classes = [IsAuthenticated]
 
@@ -259,6 +259,32 @@ class AnalyzeWoundAPIView(APIView):
         data = request.data
         image_file = request.FILES.get('image_file')
         image_base64 = data.get('image_base64') or data.get('image')
+        if image_file is None and not image_base64:
+            return Response({"detail": "A wound photo is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            res = detect_wound_box(image_file=image_file, image_base64=image_base64)
+            return Response(res, status=status.HTTP_200_OK)
+        except ValueError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AnalyzeWoundAPIView(APIView):
+    """
+    POST /api/scans/analyze/
+    Runs the AI pipeline on a wound photo. Nothing is saved; the client saves the
+    accepted result through POST /api/scans/.
+    Supports an optional crop_box (user-confirmed / adjusted boundary).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, *args, **kwargs):
+        data = request.data
+        image_file = request.FILES.get('image_file')
+        image_base64 = data.get('image_base64') or data.get('image')
+        crop_box = data.get('crop_box') or data.get('cropBox')
         if image_file is None and not image_base64:
             return Response({"detail": "A wound photo is required."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -277,6 +303,7 @@ class AnalyzeWoundAPIView(APIView):
                 patient=patient,
                 wound_profile=wound_profile,
                 baseline_image=data.get('baseline_image_base64') or data.get('baselineImage') or data.get('baseline_image'),
+                crop_box=crop_box,
             )
         except ValueError as e:
             # unusable photo (no wound found, unreadable image): tell the user, don't guess
@@ -337,11 +364,16 @@ class WoundAssessmentScanViewSet(viewsets.ModelViewSet):
             except (TypeError, ValueError):
                 return default
 
-        area = data.get('wound_area_ratio')
-        try:
-            area = float(area) if area not in (None, "") else None
-        except (TypeError, ValueError):
-            area = None
+        def optional_float(key):
+            value = data.get(key)
+            try:
+                return float(value) if value not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        area = optional_float('wound_area_ratio')
+        area_cm2 = optional_float('wound_area_cm2')
+        card_block_ratio = optional_float('card_block_ratio')
 
         image_bytes, ext = _decode_image(data.get('image_base64', data.get('image', '')))
         scan_date_formatted = data.get('scan_date_formatted') or data.get('scanDateFormatted') or "Today"
@@ -362,6 +394,8 @@ class WoundAssessmentScanViewSet(viewsets.ModelViewSet):
                 slough_percent=pct('slough', 0.0),
                 necrotic_percent=pct('necrotic', 0.0),
                 wound_area_ratio=area,
+                wound_area_cm2=area_cm2,
+                card_block_ratio=card_block_ratio,
                 is_latest=True,
                 scan_date_formatted=scan_date_formatted,
             )

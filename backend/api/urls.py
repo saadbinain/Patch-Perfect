@@ -5,6 +5,7 @@ from .views import (
     WoundAssessmentScanViewSet,
     TreatmentGuidelineViewSet,
     AnalyzeWoundAPIView,
+    DetectWoundBoxAPIView,
     RegisterAPIView,
     LoginAPIView,
     CurrentUserAPIView,
@@ -27,6 +28,7 @@ urlpatterns = [
     path('health/', HealthAPIView.as_view(), name='health'),
 
     # Clinical & AI endpoints
+    path('scans/detect-box/', DetectWoundBoxAPIView.as_view(), name='detect-wound-box'),
     path('scans/analyze/', AnalyzeWoundAPIView.as_view(), name='analyze-wound'),
     path('', include(router.urls)),
 ]

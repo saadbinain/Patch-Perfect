@@ -8,9 +8,20 @@ Implements Phase 2: Data Preprocessing (MLDLC) from Chapter III:
 
 import io
 import base64
-from PIL import Image
+from PIL import Image, ImageOps
 
 TARGET_IMAGE_SIZE = (512, 512)
+
+
+def _upright_rgb(img):
+    """Apply the camera's EXIF rotation, as browsers do when they display the photo.
+    Without this the clinician's crop box (drawn on the upright photo) lands on the
+    wrong part of the image the models see, and phone photos are analysed sideways."""
+    try:
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+    return img.convert("RGB")
 
 def load_image_from_input(image_input):
     """
@@ -21,7 +32,7 @@ def load_image_from_input(image_input):
         return None
 
     if isinstance(image_input, Image.Image):
-        return image_input.convert("RGB")
+        return _upright_rgb(image_input)
 
     # If base64 string
     if isinstance(image_input, str):
@@ -29,14 +40,14 @@ def load_image_from_input(image_input):
             # Strip data URL prefix (e.g. data:image/png;base64,...)
             image_input = image_input.split(",")[1]
         image_bytes = base64.b64decode(image_input)
-        return Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        return _upright_rgb(Image.open(io.BytesIO(image_bytes)))
 
     # If uploaded file / BytesIO
     if hasattr(image_input, "read"):
         content = image_input.read()
         if hasattr(image_input, "seek"):
             image_input.seek(0)
-        return Image.open(io.BytesIO(content)).convert("RGB")
+        return _upright_rgb(Image.open(io.BytesIO(content)))
 
     return None
 

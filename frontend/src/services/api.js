@@ -291,8 +291,20 @@ export const api = {
     return request(`/patients/${encodeURIComponent(patientId)}/add-wound/`, { method: "POST", body: woundData });
   },
 
+  // Run quick Stage 2 boundary detection to return the initial AI bounding box
+  detectWoundBox: async (imageDataUrl) => {
+    if (isDemo()) {
+      return { bounding_box: null, normalized_box: [0.15, 0.15, 0.85, 0.85], wound_detected: true, colour_card: null };
+    }
+    return request("/scans/detect-box/", {
+      method: "POST",
+      body: { image_base64: imageDataUrl },
+    });
+  },
+
   // Run the AI pipeline on a photo. Demo sessions get clearly flagged simulated results.
-  analyzeWound: async (imageDataUrl, patient, woundProfileId = null) => {
+  // Supports an optional user-confirmed cropBox [x1, y1, x2, y2]
+  analyzeWound: async (imageDataUrl, patient, woundProfileId = null, cropBox = null) => {
     if (isDemo()) {
       const simulated = await simulateAIAnalysis(imageDataUrl, patient, woundProfileId);
       const wound = patient?.wounds?.find((w) => w.id === woundProfileId) || patient?.wounds?.[0];
@@ -313,6 +325,7 @@ export const api = {
         patient_id: patient?.custom_id || patient?.id,
         wound_id: woundProfileId,
         image_base64: imageDataUrl,
+        crop_box: cropBox,
       },
     });
     const metrics = data.pipeline_metrics || {};
@@ -334,6 +347,8 @@ export const api = {
         segmentation: metrics.segmentation,
         classification: metrics.classification,
         tissueMethod: metrics.tissue_method,
+        colourCard: metrics.colour_card,
+        sizeBasis: metrics.size_basis,
       },
     };
   },
@@ -356,6 +371,8 @@ export const api = {
         image_base64: imagePreview,
         tissue_stats: extractTissueStats(scanResult),
         wound_area_ratio: scanResult.pipelineResults?.segmentation?.wound_area_ratio ?? null,
+        wound_area_cm2: scanResult.pipelineResults?.segmentation?.wound_area_cm2 ?? null,
+        card_block_ratio: scanResult.pipelineResults?.colourCard?.block_area_ratio ?? null,
         scan_date: scanDateObj.toISOString(),
         scan_date_formatted: formatDisplayDate(scanDateObj, true),
       },

@@ -158,3 +158,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 DATA_UPLOAD_MAX_MEMORY_SIZE = 52428800
 FILE_UPLOAD_MAX_MEMORY_SIZE = 52428800
 
+# Side length of ONE colour patch on the printed colour reference card, in cm.
+# Used to turn wound pixels into cm2. Measure the card in use and set it here
+# (or with the COLOUR_CARD_PATCH_CM environment variable).
+COLOUR_CARD_PATCH_CM = float(os.environ.get('COLOUR_CARD_PATCH_CM', '1.0'))

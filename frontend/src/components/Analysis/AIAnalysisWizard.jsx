@@ -15,6 +15,7 @@ import {
   Circle,
 } from "lucide-react";
 import { CircularGauge } from "../Common/CircularGauge";
+import { WoundCropAdjuster } from "./WoundCropAdjuster";
 import { api } from "../../services/api";
 import { getWoundLabel } from "../../services/woundLabel";
 import {
@@ -96,6 +97,9 @@ const sectionLabel = {
   marginBottom: "8px",
 };
 
+// Used when the AI finds no wound outline: the middle 70% of the photo.
+const DEFAULT_CROP_BOX = [0.15, 0.15, 0.85, 0.85];
+
 export const AIAnalysisWizard = ({
   patients = [],
   initialPatient = null,
@@ -119,6 +123,10 @@ export const AIAnalysisWizard = ({
   const woundIsKnown = Boolean(initialWound) || (initialPatient?.wounds?.length ?? 0) <= 1;
   const [currentStep, setCurrentStep] = useState(initialPatient && woundIsKnown ? 2 : 1);
   const [imagePreview, setImagePreview] = useState(null);
+  const [cropBox, setCropBox] = useState(DEFAULT_CROP_BOX);
+  const [isDetectingBox, setIsDetectingBox] = useState(false);
+  const [woundBoxDetected, setWoundBoxDetected] = useState(true);
+  const [cardFound, setCardFound] = useState(null); // null = not checked yet
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [stageIndex, setStageIndex] = useState(-1);
   const [analysisResult, setAnalysisResult] = useState(null);
@@ -174,10 +182,43 @@ export const AIAnalysisWizard = ({
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => setImagePreview(reader.result);
+    reader.onload = () => {
+      setImagePreview(reader.result);
+      detectBoxFor(reader.result);
+    };
     reader.readAsDataURL(file);
     // allow re-selecting the same file after a retake
     e.target.value = "";
+  };
+
+  // Pre-fill the crop box from the AI's wound outline. Only the newest photo's
+  // answer is used, so a slow reply for an earlier photo can't move the box.
+  const detectRequestRef = useRef(0);
+  const detectBoxFor = async (dataUrl) => {
+    const requestId = ++detectRequestRef.current;
+    setIsDetectingBox(true);
+    let box = DEFAULT_CROP_BOX;
+    let detected = false;
+    let card = null;
+    try {
+      const res = await api.detectWoundBox(dataUrl);
+      if (res?.normalized_box?.length === 4) {
+        box = res.normalized_box;
+        detected = Boolean(res.wound_detected);
+      }
+      if (res?.colour_card) card = Boolean(res.colour_card.detected);
+    } catch (err) {
+      console.warn("Could not auto-detect wound boundary:", err);
+    }
+    if (requestId !== detectRequestRef.current) return;
+    setCropBox(box);
+    setWoundBoxDetected(detected);
+    setCardFound(card);
+    setIsDetectingBox(false);
+  };
+
+  const handleResetAutoBox = () => {
+    if (imagePreview) detectBoxFor(imagePreview);
   };
 
   const handleCreateWound = async () => {
@@ -244,7 +285,7 @@ export const AIAnalysisWizard = ({
       if (!cancelled) setStageIndex(3);
     })();
     try {
-      const result = await api.analyzeWound(imagePreview, selectedPatient, selectedWound?.id ?? null);
+      const result = await api.analyzeWound(imagePreview, selectedPatient, selectedWound?.id ?? null, cropBox);
       cancelled = true;
       await ticker;
       setStageIndex(4);
@@ -690,49 +731,66 @@ export const AIAnalysisWizard = ({
           style={{ display: "none" }}
         />
 
-        <button
-          type="button"
-          className={`camera-upload-dropzone ${imagePreview ? "has-file" : ""}`}
-          onClick={() => fileInputRef.current?.click()}
-          style={{ width: "100%" }}
-        >
-          {imagePreview ? (
-            <div style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "center" }}>
-              <img
-                src={imagePreview}
-                alt="Selected wound photo"
-                style={{ maxHeight: "200px", maxWidth: "100%", borderRadius: "12px", objectFit: "cover" }}
-              />
-              <span style={{ fontSize: "0.78rem", color: "#166534", fontWeight: "700", marginTop: "8px" }}>
-                Photo ready · tap to retake
-              </span>
-            </div>
-          ) : (
-            <>
-              <div
-                style={{
-                  width: "56px",
-                  height: "56px",
-                  borderRadius: "16px",
-                  backgroundColor: "#FEE2E2",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: "#8B1E1E",
-                  marginBottom: "12px",
-                }}
-              >
-                <Camera size={28} />
-              </div>
-              <strong style={{ fontSize: "0.95rem", color: "#1E293B" }}>Take or choose a photo</strong>
-              <p style={{ fontSize: "0.76rem", color: "#64748B", marginTop: "6px", lineHeight: 1.45 }}>
-                Good light, camera parallel to the wound,
-                <br />
-                whole wound edge in frame
+        {imagePreview ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            <WoundCropAdjuster
+              imageSrc={imagePreview}
+              cropBox={cropBox}
+              onChange={setCropBox}
+              isDetecting={isDetectingBox}
+              woundDetected={woundBoxDetected}
+              onResetAuto={handleResetAutoBox}
+            />
+            {!isDetectingBox && cardFound === false && (
+              <p style={{ fontSize: "0.74rem", color: "#854D0E", background: "#FEF9C3", borderRadius: "8px", padding: "8px 10px", margin: 0, lineHeight: 1.4 }}>
+                Colour card not found. Wound size can't be measured in cm² without it. Retake with the card flat next to the wound.
               </p>
-            </>
-          )}
-        </button>
+            )}
+            {!isDetectingBox && cardFound === true && (
+              <p style={{ fontSize: "0.74rem", color: "#166534", margin: 0 }}>
+                Colour card found: size will be measured in cm².
+              </p>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "2px" }}>
+              <button
+                type="button"
+                style={{ ...smallButton, color: "#8B1E1E" }}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                Choose different photo
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="camera-upload-dropzone"
+            onClick={() => fileInputRef.current?.click()}
+            style={{ width: "100%" }}
+          >
+            <div
+              style={{
+                width: "56px",
+                height: "56px",
+                borderRadius: "16px",
+                backgroundColor: "#FEE2E2",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#8B1E1E",
+                marginBottom: "12px",
+              }}
+            >
+              <Camera size={28} />
+            </div>
+            <strong style={{ fontSize: "0.95rem", color: "#1E293B" }}>Take or choose a photo</strong>
+            <p style={{ fontSize: "0.76rem", color: "#64748B", marginTop: "6px", lineHeight: 1.45 }}>
+              Good light, camera parallel to the wound,
+              <br />
+              whole wound edge in frame
+            </p>
+          </button>
+        )}
 
         {renderDateRow()}
       </div>
@@ -744,12 +802,18 @@ export const AIAnalysisWizard = ({
         <button
           type="button"
           onClick={handleStartAnalysis}
-          disabled={!imagePreview || isAnalyzing}
+          disabled={!imagePreview || isAnalyzing || isDetectingBox}
           className="btn-primary"
-          style={{ padding: "14px", opacity: !imagePreview ? 0.5 : 1 }}
+          style={{ padding: "14px", opacity: !imagePreview || isDetectingBox ? 0.5 : 1 }}
         >
           <Microscope size={20} />
-          <span>{imagePreview ? "Analyze wound" : "Add a photo to analyze"}</span>
+          <span>
+            {isDetectingBox
+              ? "Finding wound boundary..."
+              : imagePreview
+              ? "Analyze wound in box"
+              : "Add a photo to analyze"}
+          </span>
         </button>
       </div>
     </>
@@ -923,8 +987,15 @@ export const AIAnalysisWizard = ({
         note: analysisResult.woundTypeLocked ? "Set at first scan" : "Kept for this wound",
       },
       { label: "Severity", value: analysisResult.severityLevel, tone: severityTone },
-      { label: "Healing", value: analysisResult.healingStatus, tone: healingTone },
+      {
+        label: "Healing",
+        value: analysisResult.healingStatus,
+        tone: healingTone,
+        note: analysisResult.pipelineResults?.sizeBasis === "cm2" ? "Size compared in cm²" : null,
+      },
     ];
+    const seg = analysisResult.pipelineResults?.segmentation || {};
+    const card = analysisResult.pipelineResults?.colourCard;
 
     return (
       <div className="app-card" style={{ padding: "18px 16px", display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -960,6 +1031,31 @@ export const AIAnalysisWizard = ({
               )}
             </div>
           ))}
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "baseline",
+            gap: "8px",
+            background: "#F8FAFC",
+            border: "1px solid #E2E8F0",
+            borderRadius: "14px",
+            padding: "10px 14px",
+          }}
+        >
+          <span style={{ fontSize: "0.68rem", fontWeight: "700", color: "#64748B", textTransform: "uppercase" }}>
+            Wound size
+          </span>
+          <span style={{ textAlign: "right" }}>
+            <strong style={{ fontSize: "0.95rem", color: "#1E293B" }}>
+              {seg.wound_area_cm2 != null ? `${seg.wound_area_cm2.toFixed(1)} cm²` : "Not measured"}
+            </strong>
+            <span style={{ fontSize: "0.66rem", color: "#94A3B8", display: "block" }}>
+              {card?.detected ? "Scaled with the colour card" : "Colour card not found in photo"}
+            </span>
+          </span>
         </div>
 
         <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: "14px", padding: "12px 14px" }}>

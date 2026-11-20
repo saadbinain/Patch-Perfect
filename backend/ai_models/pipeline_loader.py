@@ -33,6 +33,7 @@ except ImportError:
 
 from .preprocessor import preprocess_wound_image, load_image_from_input
 from .severity_analyzer import analyze_tissue_and_severity, evaluate_healing_status
+from .colour_card import detect_colour_card, apply_white_balance
 
 AI_MODELS_DIR = Path(__file__).resolve().parent
 WEIGHTS_DIR = AI_MODELS_DIR / "weights"
@@ -72,6 +73,88 @@ def _clean_state_dict(checkpoint):
     if isinstance(checkpoint, dict):
         state_dict = checkpoint.get('model_state_dict', checkpoint.get('state_dict', checkpoint))
     return {(k[7:] if k.startswith('module.') else k): v for k, v in state_dict.items()}
+
+
+def _parse_crop_box(crop_box, img_w, img_h):
+    """
+    Parses a user-confirmed crop box in either pixel coords or normalized [0..1] coords.
+    Returns (xmin, ymin, xmax, ymax) in integer pixel coordinates clamped to image bounds.
+    """
+    if not crop_box:
+        return None
+    try:
+        if isinstance(crop_box, dict):
+            x1 = crop_box.get('x1', crop_box.get('x', 0))
+            y1 = crop_box.get('y1', crop_box.get('y', 0))
+            x2 = crop_box.get('x2', x1 + crop_box.get('width', img_w))
+            y2 = crop_box.get('y2', y1 + crop_box.get('height', img_h))
+        elif isinstance(crop_box, (list, tuple)) and len(crop_box) == 4:
+            x1, y1, x2, y2 = crop_box
+        else:
+            return None
+
+        vals = [float(x1), float(y1), float(x2), float(y2)]
+        if all(0.0 <= v <= 1.0 for v in vals) and (vals[2] <= 1.0 and vals[3] <= 1.0):
+            px1 = int(round(vals[0] * img_w))
+            py1 = int(round(vals[1] * img_h))
+            px2 = int(round(vals[2] * img_w))
+            py2 = int(round(vals[3] * img_h))
+        else:
+            px1 = int(round(vals[0]))
+            py1 = int(round(vals[1]))
+            px2 = int(round(vals[2]))
+            py2 = int(round(vals[3]))
+
+        xmin, xmax = sorted([px1, px2])
+        ymin, ymax = sorted([py1, py2])
+        xmin = max(0, min(img_w - 2, xmin))
+        ymin = max(0, min(img_h - 2, ymin))
+        xmax = max(xmin + 1, min(img_w, xmax))
+        ymax = max(ymin + 1, min(img_h, ymax))
+        return (xmin, ymin, xmax, ymax)
+    except Exception:
+        return None
+
+
+# Warn when the card looks this much bigger/smaller (linear size) than on the last scan.
+DISTANCE_CHANGE_WARN = 1.25
+
+
+def _filled_area_ratio(mask):
+    """Wound size as a share of the photo, measured from the filled outline: slough or
+    dead tissue that the segmenter leaves as a hole inside the wound is still wound bed."""
+    if mask is None or not mask.any():
+        return None
+    filled = np.zeros_like(mask)
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(filled, contours, -1, 1, thickness=cv2.FILLED)
+    return float(filled.sum()) / float(mask.size)
+
+
+def _card_summary(card):
+    """The part of the colour-card result that is returned to the app."""
+    return {
+        "detected": card["detected"],
+        "block_area_ratio": card["block_area_ratio"],
+        "pixels_per_cm": card["pixels_per_cm"],
+        "white_balance_gains": card["white_balance_gains"],
+    }
+
+
+def _distance_note(card, previous_scan):
+    """Compares the card's apparent size with the previous scan of this wound."""
+    prev = getattr(previous_scan, "card_block_ratio", None) if previous_scan else None
+    cur = card.get("block_area_ratio")
+    if not prev or not cur:
+        return None, None
+    linear = float(np.sqrt(cur / prev))  # >1: camera closer than last time
+    if linear >= DISTANCE_CHANGE_WARN:
+        return round(linear, 2), (f"This photo was taken closer than the last one (card looks {linear:.1f}x bigger). "
+                                  "Size is still measured in cm², but matching the distance gives more reliable results.")
+    if linear <= 1 / DISTANCE_CHANGE_WARN:
+        return round(linear, 2), (f"This photo was taken further away than the last one (card looks {1 / linear:.1f}x smaller). "
+                                  "Size is still measured in cm², but matching the distance gives more reliable results.")
+    return round(linear, 2), None
 
 
 def build_fusegnet():
@@ -316,11 +399,10 @@ class AIPipelineManager:
         references, has_history = self._history_references(wound_profile, baseline_image_input)
         return self.match_against_history(current_pil, references, has_history, wound_title, warnings)
 
-    # ------------------------------------------------------------------ main
-    def run_inference(self, image_input, patient=None, wound_profile=None, baseline_image_input=None):
+    def detect_box(self, image_input):
         """
-        Runs the pipeline. Raises ValueError when the input has no usable image or
-        when no wound tissue can be found at all.
+        Stage 2 preview: runs FUSegNet segmentation on the full image to return the
+        auto-detected wound bounding box and normalized box for interactive clinician cropping.
         """
         pil_input = load_image_from_input(image_input)
         if pil_input is None:
@@ -329,25 +411,100 @@ class AIPipelineManager:
         self.load_models()
         preprocessed = preprocess_wound_image(pil_input)
         pil_img = preprocessed["pil_image"]
+        img_w, img_h = pil_img.size
+
+        mask, bbox, area_ratio = self._segment(pil_img)
+        card = detect_colour_card(pil_input)
+        if bbox is None:
+            # Default to centered 70% frame if no wound outline was detected
+            pad_w = int(img_w * 0.15)
+            pad_h = int(img_h * 0.15)
+            bbox = (pad_w, pad_h, img_w - pad_w, img_h - pad_h)
+            detected = False
+        else:
+            detected = True
+
+        norm_box = [
+            round(bbox[0] / max(img_w, 1), 4),
+            round(bbox[1] / max(img_h, 1), 4),
+            round(bbox[2] / max(img_w, 1), 4),
+            round(bbox[3] / max(img_h, 1), 4),
+        ]
+        return {
+            "bounding_box": list(bbox),
+            "normalized_box": norm_box,
+            "wound_detected": detected,
+            "image_width": img_w,
+            "image_height": img_h,
+            "wound_area_ratio": round(area_ratio, 5) if area_ratio is not None else None,
+            "colour_card": _card_summary(card),
+        }
+
+    # ------------------------------------------------------------------ main
+    def run_inference(self, image_input, patient=None, wound_profile=None, baseline_image_input=None, crop_box=None):
+        """
+        Runs the pipeline. Raises ValueError when the input has no usable image or
+        when no wound tissue can be found at all.
+        Supports an optional crop_box (user-confirmed / adjusted bounding box).
+        """
+        pil_input = load_image_from_input(image_input)
+        if pil_input is None:
+            raise ValueError("A wound photo is required.")
+
+        self.load_models()
+        preprocessed = preprocess_wound_image(pil_input)
+        pil_img = preprocessed["pil_image"]
+        img_w, img_h = pil_img.size
         warnings = []
+        user_crop = _parse_crop_box(crop_box, img_w, img_h)
 
         baseline_scan = self._baseline_scan(wound_profile)
+        previous_scan = wound_profile.scans.order_by('-scan_date', '-id').first() if wound_profile is not None else None
+
+        # Colour card, found on the FULL photo (it is outside the clinician's crop)
+        card = detect_colour_card(pil_input)
+        if not card["detected"]:
+            warnings.append("Colour card not found in the photo, so the wound size could not be measured in cm². "
+                            "Place the card next to the wound, flat and fully in frame.")
+        distance_change, distance_warning = _distance_note(card, previous_scan)
+        if distance_warning:
+            warnings.append(distance_warning)
 
         # Stage 1: similarity
         similarity_data = self._check_similarity(pil_img, wound_profile, baseline_image_input, warnings)
 
         # Stage 2: segmentation
-        mask, bbox, area_ratio = self._segment(pil_img)
+        mask, auto_bbox, raw_area_ratio = self._segment(pil_img)
         if self.fusegnet_model is None:
             warnings.append("Wound segmentation model is not loaded; tissue was analysed on the whole photo.")
         elif mask is None:
-            # The segmenter ran and found nothing: scoring the whole photo would grade
-            # background and skin as tissue, so ask for a better photo instead.
+            # The segmenter ran and found nothing: scoring the whole photo (or the whole
+            # box) would grade background and skin as tissue, so ask for a better photo.
             raise ValueError("No wound was detected in this photo. Retake it closer to the wound, in good light, with the whole wound in frame.")
 
-        if bbox:
-            crop = pil_img.crop(bbox)
-            crop_mask = mask[bbox[1]:bbox[3], bbox[0]:bbox[2]]
+        # Clinician-confirmed crop box: only wound pixels inside it count, so hair,
+        # background, clothing and the colour card outside the box are excluded.
+        if user_crop:
+            cx1, cy1, cx2, cy2 = user_crop
+            active_bbox = user_crop
+            if mask is not None:
+                filtered_mask = np.zeros_like(mask)
+                filtered_mask[cy1:cy2, cx1:cx2] = mask[cy1:cy2, cx1:cx2]
+                if not filtered_mask.any():
+                    raise ValueError("The box does not contain the wound. Widen the box so the whole wound edge is inside it.")
+                mask = filtered_mask
+                # Size stays a share of the FULL photo, never of the crop: a tighter box
+                # must not make the wound look bigger (false "Deteriorating").
+                area_ratio = _filled_area_ratio(mask)
+            else:
+                area_ratio = None
+        else:
+            active_bbox = auto_bbox
+            area_ratio = _filled_area_ratio(mask) if mask is not None else raw_area_ratio
+
+        if active_bbox:
+            crop = pil_img.crop(active_bbox)
+            crop_mask = mask[active_bbox[1]:active_bbox[3], active_bbox[0]:active_bbox[2]] if mask is not None else None
         else:
             crop, crop_mask = pil_img, None
 
@@ -355,9 +512,17 @@ class AIPipelineManager:
             "model": "FUSegNet",
             "weights_loaded": self.fusegnet_model is not None,
             "wound_detected": mask is not None,
-            "wound_area_ratio": round(area_ratio, 5) if mask is not None else None,
-            "bounding_box": bbox,
+            "wound_area_ratio": round(area_ratio, 5) if area_ratio is not None else None,
+            "bounding_box": list(active_bbox) if active_bbox else None,
+            "auto_bounding_box": list(auto_bbox) if auto_bbox else None,
+            "crop_box_applied": user_crop is not None,
         }
+        # Real size: the wound's share of the photo times the area the photo covers,
+        # which the card tells us. Independent of crop and of camera distance.
+        area_cm2 = None
+        if card["detected"] and area_ratio is not None:
+            area_cm2 = round(area_ratio * card["photo_area_cm2"], 2)
+        segmentation_data["wound_area_cm2"] = area_cm2
 
         # Stage 3: classification
         pred_raw, clf_conf, probs = self._classify(crop)
@@ -377,14 +542,26 @@ class AIPipelineManager:
         }
 
         # Stage 4: tissue & severity, restricted to wound pixels when we have a mask
-        sev = analyze_tissue_and_severity(crop, region_mask=crop_mask)
+        # Colours are corrected with the card's white first, so lighting doesn't shift tissue classes.
+        sev = analyze_tissue_and_severity(apply_white_balance(crop, card["white_balance_gains"]), region_mask=crop_mask)
         if not sev["tissue_detected"]:
             raise ValueError("No wound tissue could be identified in this photo. Retake it closer to the wound, in good light.")
 
         # Longitudinal healing: wound area vs the Day 1 scan of this same wound
-        baseline_area = getattr(baseline_scan, 'wound_area_ratio', None) if baseline_scan else None
+        # Compare in cm2 when both scans have it; otherwise fall back to share of the
+        # photo, which is only fair when both photos were taken at the same distance.
+        baseline_cm2 = getattr(baseline_scan, 'wound_area_cm2', None) if baseline_scan else None
+        if area_cm2 is not None and baseline_cm2:
+            current_area, baseline_area, size_basis = area_cm2, baseline_cm2, "cm2"
+        else:
+            current_area = segmentation_data["wound_area_ratio"]
+            baseline_area = getattr(baseline_scan, 'wound_area_ratio', None) if baseline_scan else None
+            size_basis = "photo share"
+            if baseline_scan is not None and not similarity_data.get("is_baseline") and current_area and baseline_area:
+                warnings.append("Healing trend uses the wound's share of the photo because the Day 1 scan has no cm² measurement; "
+                                "it is only reliable if both photos were taken from the same distance.")
         healing_status = evaluate_healing_status(
-            current_area=segmentation_data["wound_area_ratio"],
+            current_area=current_area,
             baseline_area=baseline_area,
             current_severity_score=sev["severity_score"],
             baseline_severity_score=getattr(baseline_scan, 'severity_score', None) if baseline_scan else None,
@@ -408,7 +585,10 @@ class AIPipelineManager:
                     "slough": sev["slough_pct"],
                     "necrotic": sev["necrosis_pct"],
                 },
-                "tissue_method": "HSV colour analysis" + (" within wound mask" if crop_mask is not None else " on whole photo"),
+                "tissue_method": "HSV colour analysis" + (" within wound mask" if crop_mask is not None else " on whole photo")
+                                 + (", colour-corrected with the card" if card["white_balance_gains"] else ""),
+                "colour_card": {**_card_summary(card), "distance_vs_previous": distance_change},
+                "size_basis": size_basis,
                 "wound_pixels": sev["wound_pixels"],
                 "raw_severity_level": sev.get("raw_severity_level"),
             },
