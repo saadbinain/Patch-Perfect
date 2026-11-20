@@ -1,7 +1,12 @@
+from django.conf import settings
 from django.db import models
 
 class Patient(models.Model):
-    custom_id = models.CharField(max_length=20, unique=True, help_text="Patient identification code (e.g. 089)")
+    # Each patient belongs to the clinician who registered it; every API query is scoped by owner.
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='patients', null=True, blank=True
+    )
+    custom_id = models.CharField(max_length=20, help_text="Patient identification code (e.g. 089), unique per clinician")
     name = models.CharField(max_length=150)
     age = models.PositiveIntegerField(default=45)
     gender = models.CharField(max_length=20, default="Other")
@@ -13,6 +18,11 @@ class Patient(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['owner', 'custom_id'], name='unique_patient_id_per_owner'),
+        ]
+
     def __str__(self):
         return f"{self.name} (#{self.custom_id})"
 
@@ -22,11 +32,15 @@ class Patient(models.Model):
 
 
 class WoundProfile(models.Model):
+    # Values the classifier and the app actually produce
     WOUND_CHOICES = [
+        ('Pending AI Scan', 'Pending AI Scan'),
+        ('Diabetic Ulcer', 'Diabetic Ulcer'),
         ('Diabetic Wound', 'Diabetic Wound'),
         ('Surgical Wound', 'Surgical Wound'),
         ('Pressure Injury', 'Pressure Injury'),
         ('Venous Ulcer', 'Venous Ulcer'),
+        ('Unclassified', 'Unclassified'),
     ]
 
     STATUS_CHOICES = [
@@ -73,6 +87,8 @@ class WoundAssessmentScan(models.Model):
     granulation_percent = models.FloatField(default=50.0)
     slough_percent = models.FloatField(default=35.0)
     necrotic_percent = models.FloatField(default=15.0)
+    # Fraction of the photo covered by the FUSegNet wound mask; used for healing trend vs Day 1
+    wound_area_ratio = models.FloatField(null=True, blank=True)
 
     is_latest = models.BooleanField(default=True)
     scan_date = models.DateTimeField(auto_now_add=True)

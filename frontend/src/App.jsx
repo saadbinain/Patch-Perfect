@@ -8,7 +8,7 @@ import { AIAnalysisWizard } from "./components/Analysis/AIAnalysisWizard";
 import { GuidelinesScreen } from "./components/Guidelines/GuidelinesScreen";
 import { SettingsModal } from "./components/Modals/SettingsModal";
 import { AuthScreen } from "./components/Auth/AuthScreen";
-import { api } from "./services/api";
+import { api, clearLocalPatientCache } from "./services/api";
 import { authService } from "./services/authService";
 import {
   getSimulatedDateConfig,
@@ -22,6 +22,9 @@ export function App() {
   const [activeTab, setActiveTab] = useState("wounds"); // "wounds" | "scan" | "guidelines"
   const [patients, setPatients] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  // Server/connection problems are shown, never silently replaced with local or fake data
+  const [appError, setAppError] = useState(null); // { message, retry? }
+  const isDemoSession = authService.isDemoSession();
 
   // Date Simulation State
   const [simConfig, setSimConfig] = useState(getSimulatedDateConfig());
@@ -113,10 +116,17 @@ export function App() {
   // Load patients from API / local storage
   const loadPatients = async () => {
     setIsLoading(true);
-    const data = await api.getPatients();
-    setPatients(data);
-    setIsLoading(false);
-    return data;
+    try {
+      const data = await api.getPatients();
+      setPatients(data);
+      setAppError(null);
+      return data;
+    } catch (err) {
+      setAppError({ message: err.message, retry: loadPatients });
+      return null;
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   useEffect(() => {
@@ -134,6 +144,7 @@ export function App() {
   };
 
   // Handle New Patient Creation
+  // Errors propagate to the modal, which shows them and stays open
   const handleCreatePatient = async (newPatientData) => {
     const created = await api.createPatient(newPatientData);
     await loadPatients();
@@ -158,12 +169,13 @@ export function App() {
   };
 
   // Handle AI Scan Save with Custom/Simulated Date & Target Wound
+  // A failed save throws back to the wizard, which keeps the result and shows the error
   const handleSaveScanResult = async (patientId, scanResult, imagePreview, customDate, woundProfileId = null) => {
     let found = null;
     if (patientId) {
       await api.saveScanResult(patientId, scanResult, imagePreview, customDate, woundProfileId);
       const updatedList = await loadPatients();
-      found = updatedList.find((p) => (p.id || p.custom_id) === patientId) || null;
+      found = updatedList?.find((p) => (p.id || p.custom_id) === patientId) || null;
     }
     setScanningPatient(null);
     setScanningWound(null);
@@ -193,19 +205,29 @@ export function App() {
   // Load Demo Data
   const handleLoadDemoData = async () => {
     setIsLoading(true);
-    const loaded = await api.loadDemoData();
-    setPatients(loaded);
-    setIsLoading(false);
+    try {
+      setPatients(await api.loadDemoData());
+      setAppError(null);
+    } catch (err) {
+      setAppError({ message: err.message });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // Reset to Empty Data (Clear all records)
   const handleResetData = async () => {
     setIsLoading(true);
-    const resetList = await api.clearAllData();
-    setPatients(resetList);
-    setSelectedPatientForTrend(null);
-    setViewingWoundId(null);
-    setIsLoading(false);
+    try {
+      setPatients(await api.clearAllData());
+      setSelectedPatientForTrend(null);
+      setViewingWoundId(null);
+      setAppError(null);
+    } catch (err) {
+      setAppError({ message: err.message });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   // If not authenticated, show modern medical Auth Gate (Sign In / Register)
@@ -213,8 +235,9 @@ export function App() {
     return (
       <AuthScreen
         onAuthSuccess={(user) => {
+          // Real accounts keep data on the server only; drop any old on-device patient cache
+          if (!authService.isDemoSession()) clearLocalPatientCache();
           setCurrentUser(user);
-          loadPatients();
         }}
       />
     );
@@ -291,6 +314,61 @@ export function App() {
           currentUser={currentUser}
           onOpenSettings={() => setIsSettingsModalOpen(true)}
         />
+      )}
+
+      {/* Demo mode: make it impossible to mistake simulated output for real AI */}
+      {isDemoSession && (
+        <div
+          role="status"
+          style={{
+            background: "#FEF3C7",
+            color: "#78350F",
+            borderBottom: "1px solid #FDE68A",
+            padding: "6px 14px",
+            fontSize: "0.74rem",
+            fontWeight: 700,
+            textAlign: "center",
+          }}
+        >
+          Demo mode · AI results are simulated and data stays on this device
+        </div>
+      )}
+
+      {/* Connection / server errors */}
+      {appError && (
+        <div
+          role="alert"
+          style={{
+            background: "#FEF2F2",
+            color: "#991B1B",
+            borderBottom: "1px solid #FECDD3",
+            padding: "8px 14px",
+            fontSize: "0.78rem",
+            fontWeight: 600,
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+          }}
+        >
+          <span style={{ flex: 1, lineHeight: 1.35 }}>{appError.message}</span>
+          {appError.retry && (
+            <button
+              type="button"
+              onClick={() => appError.retry()}
+              style={{ background: "#991B1B", color: "#FFFFFF", border: "none", borderRadius: "6px", padding: "5px 10px", fontSize: "0.72rem", fontWeight: 700, cursor: "pointer" }}
+            >
+              Retry
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => setAppError(null)}
+            style={{ background: "none", border: "none", color: "#991B1B", fontSize: "1rem", cursor: "pointer", padding: "0 2px" }}
+          >
+            ×
+          </button>
+        </div>
       )}
 
       {/* Simulated Date Notification Banner */}

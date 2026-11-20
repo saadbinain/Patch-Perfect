@@ -9,6 +9,7 @@ from .views import (
     LoginAPIView,
     CurrentUserAPIView,
     LogoutAPIView,
+    HealthAPIView,
 )
 
 router = DefaultRouter()
@@ -22,6 +23,8 @@ urlpatterns = [
     path('auth/login/', LoginAPIView.as_view(), name='auth-login'),
     path('auth/me/', CurrentUserAPIView.as_view(), name='auth-me'),
     path('auth/logout/', LogoutAPIView.as_view(), name='auth-logout'),
+
+    path('health/', HealthAPIView.as_view(), name='health'),
 
     # Clinical & AI endpoints
     path('scans/analyze/', AnalyzeWoundAPIView.as_view(), name='analyze-wound'),

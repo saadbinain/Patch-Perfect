@@ -1,12 +1,19 @@
+import base64
+import binascii
 import random
-from rest_framework import viewsets, status
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.decorators import action
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.authtoken.models import Token
+import uuid
+
+from django.core.files.base import ContentFile
+from django.db import IntegrityError, transaction
 from django.shortcuts import get_object_or_404
-from django.contrib.auth.models import User
+from django.utils.dateparse import parse_datetime
+from rest_framework import viewsets, status
+from rest_framework.decorators import action
+from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework.authtoken.models import Token
 
 from .models import Patient, WoundProfile, WoundAssessmentScan, TreatmentGuideline
 from .serializers import (
@@ -17,9 +24,67 @@ from .serializers import (
     RegisterSerializer,
     LoginSerializer,
 )
-from .ai_pipeline import run_ai_inference_pipeline
+from .ai_pipeline import run_ai_inference_pipeline, pipeline_status
+
+PENDING_TYPE = "Pending AI Scan"
 
 
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+def _decode_image(value):
+    """data-URL / raw base64 -> (bytes, ext); raises ValidationError on garbage."""
+    if not value:
+        return None, None
+    header, _, payload = value.partition(",") if value.startswith("data:") else ("", "", value)
+    ext = "png" if "png" in header else "webp" if "webp" in header else "jpg"
+    try:
+        return base64.b64decode(payload, validate=False), ext
+    except (binascii.Error, ValueError):
+        raise ValidationError({"image_base64": "Image data is not valid base64."})
+
+
+def _generate_patient_id(owner):
+    """Random 3-digit IDs first (familiar format); widen if this clinician's space fills up."""
+    taken = set(Patient.objects.filter(owner=owner).values_list("custom_id", flat=True))
+    for digits in (3, 4, 6):
+        low, high = 10 ** (digits - 1), 10 ** digits - 1
+        for _ in range(50):
+            candidate = str(random.randint(low, high))
+            if candidate not in taken:
+                return candidate
+    return uuid.uuid4().hex[:8]
+
+
+def _wound_status(severity_score, healing_status):
+    if severity_score >= 4:
+        return "ACTION NEEDED", "danger"
+    if healing_status == "Deteriorating":
+        return "DETERIORATING", "warning"
+    if healing_status == "Improving":
+        return "IMPROVING", "success"
+    return "STABLE", "info"
+
+
+def _owned_patient(request, patient_id):
+    if patient_id in (None, ""):
+        raise ValidationError({"patient_id": "patient_id is required."})
+    return get_object_or_404(Patient, owner=request.user, custom_id=str(patient_id).strip())
+
+
+def _patient_wound(patient, wound_id):
+    """The requested wound must belong to this patient; default to the first wound."""
+    if wound_id not in (None, "", "primary"):
+        wound = patient.wounds.filter(id=wound_id).first() if str(wound_id).isdigit() else None
+        if wound is None:
+            raise ValidationError({"wound_id": "This wound does not belong to the patient."})
+        return wound
+    return patient.wounds.first()
+
+
+# ---------------------------------------------------------------------------
+# auth
+# ---------------------------------------------------------------------------
 class RegisterAPIView(APIView):
     permission_classes = [AllowAny]
 
@@ -29,11 +94,7 @@ class RegisterAPIView(APIView):
             user = serializer.save()
             token, _ = Token.objects.get_or_create(user=user)
             return Response(
-                {
-                    "token": token.key,
-                    "user": UserSerializer(user).data,
-                    "message": "Registration successful.",
-                },
+                {"token": token.key, "user": UserSerializer(user).data, "message": "Registration successful."},
                 status=status.HTTP_201_CREATED,
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -48,11 +109,7 @@ class LoginAPIView(APIView):
             user = serializer.validated_data["user"]
             token, _ = Token.objects.get_or_create(user=user)
             return Response(
-                {
-                    "token": token.key,
-                    "user": UserSerializer(user).data,
-                    "message": "Login successful.",
-                },
+                {"token": token.key, "user": UserSerializer(user).data, "message": "Login successful."},
                 status=status.HTTP_200_OK,
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -62,8 +119,7 @@ class CurrentUserAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        serializer = UserSerializer(request.user)
-        return Response({"user": serializer.data}, status=status.HTTP_200_OK)
+        return Response({"user": UserSerializer(request.user).data}, status=status.HTTP_200_OK)
 
 
 class LogoutAPIView(APIView):
@@ -74,64 +130,87 @@ class LogoutAPIView(APIView):
         return Response({"message": "Successfully logged out."}, status=status.HTTP_200_OK)
 
 
+class HealthAPIView(APIView):
+    """GET /api/health/ - lets the app (and you) check the server and which AI models are loaded."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        data = {"status": "ok"}
+        if request.query_params.get("models") == "1":
+            data["models"] = pipeline_status()
+        return Response(data)
+
+
+# ---------------------------------------------------------------------------
+# patients
+# ---------------------------------------------------------------------------
 class PatientViewSet(viewsets.ModelViewSet):
-    queryset = Patient.objects.all().prefetch_related('scans', 'wounds').order_by('-created_at')
     serializer_class = PatientSerializer
     lookup_field = 'custom_id'
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return (
+            Patient.objects.filter(owner=self.request.user)
+            .prefetch_related('scans', 'wounds', 'wounds__scans')
+            .order_by('-created_at')
+        )
 
     def create(self, request, *args, **kwargs):
         data = request.data
-        custom_id = data.get('id') or str(random.randint(100, 999))
-        
-        patient = Patient.objects.create(
-            custom_id=custom_id,
-            name=data.get('name', 'Anonymous Patient'),
-            age=int(data.get('age', 45)),
-            gender=data.get('gender', 'Other'),
-            address=data.get('address', ''),
-            phone=data.get('phone', ''),
-            emergency_contact=data.get('emergencyContact', data.get('emergency_contact', '')),
-            notes=data.get('notes', ''),
-            allergies=data.get('allergies', 'None'),
-        )
+        requested_id = str(data.get('id') or "").strip()
+        if requested_id and Patient.objects.filter(owner=request.user, custom_id=requested_id).exists():
+            return Response({"id": [f"Patient ID {requested_id} is already in use."]}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            age = int(data.get('age', 45))
+        except (TypeError, ValueError):
+            return Response({"age": ["Age must be a number."]}, status=status.HTTP_400_BAD_REQUEST)
 
-        wound_type = data.get('woundType') or 'Pending AI Scan'
-        anatomical_location = data.get('anatomicalLocation', 'Lower Extremity')
-        # Label by site only: the wound type is set later by the AI scan, so baking
-        # "Pending AI Scan" into the label would leave it stale forever.
-        label = data.get('label') or data.get('woundLabel') or anatomical_location or 'Primary Wound'
+        anatomical_location = data.get('anatomicalLocation') or 'Lower Extremity'
+        wound_type = data.get('woundType') or PENDING_TYPE
+        try:
+            with transaction.atomic():
+                patient = Patient.objects.create(
+                    owner=request.user,
+                    custom_id=requested_id or _generate_patient_id(request.user),
+                    name=data.get('name') or 'Anonymous Patient',
+                    age=age,
+                    gender=data.get('gender', 'Other'),
+                    address=data.get('address', ''),
+                    phone=data.get('phone', ''),
+                    emergency_contact=data.get('emergencyContact', data.get('emergency_contact', '')),
+                    notes=data.get('notes', ''),
+                    allergies=data.get('allergies', 'None'),
+                )
+                WoundProfile.objects.create(
+                    patient=patient,
+                    # label by site only; the type is set by the first scan
+                    label=data.get('label') or data.get('woundLabel') or anatomical_location,
+                    wound_type=wound_type,
+                    anatomical_location=anatomical_location,
+                    status='AWAITING SCAN',
+                    status_type='warning',
+                    last_updated='Just now',
+                    current_severity=None,
+                    current_severity_label='Awaiting Scan',
+                    healing_status='Not Assessed',
+                    ai_recommendation='New patient profile registered. Capture or upload a wound image to run AI segmentation and classification.',
+                )
+        except IntegrityError:
+            return Response({"id": ["That patient ID was just taken. Please try again."]}, status=status.HTTP_409_CONFLICT)
 
-        WoundProfile.objects.create(
-            patient=patient,
-            label=label,
-            wound_type=wound_type,
-            anatomical_location=anatomical_location,
-            status='AWAITING SCAN',
-            status_type='warning',
-            last_updated='Just now',
-            current_severity=None,
-            current_severity_label='Awaiting Scan',
-            healing_status='Not Assessed',
-            ai_recommendation='New patient profile registered. Capture or upload a wound image to run AI segmentation and classification.',
-        )
-
-        serializer = self.get_serializer(patient)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(self.get_serializer(patient).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'], url_path='add-wound')
     def add_wound(self, request, custom_id=None):
         """Adds a new wound site to an existing patient profile."""
         patient = self.get_object()
         data = request.data
-        
         anatomical_location = data.get('anatomical_location') or data.get('anatomicalLocation') or 'Lower Extremity'
-        wound_type = data.get('wound_type') or data.get('woundType') or 'Pending AI Scan'
-        label = data.get('label') or data.get('woundLabel') or f"{anatomical_location} Site"
-        
         WoundProfile.objects.create(
             patient=patient,
-            label=label,
-            wound_type=wound_type,
+            label=data.get('label') or data.get('woundLabel') or anatomical_location,
+            wound_type=data.get('wound_type') or data.get('woundType') or PENDING_TYPE,
             anatomical_location=anatomical_location,
             status='AWAITING SCAN',
             status_type='warning',
@@ -141,180 +220,154 @@ class PatientViewSet(viewsets.ModelViewSet):
             healing_status='Not Assessed',
             ai_recommendation=f'New wound site registered at {anatomical_location}. Capture or upload a wound image to run AI segmentation and classification.',
         )
-        
-        patient.refresh_from_db()
-        serializer = self.get_serializer(patient)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        patient = self.get_queryset().get(pk=patient.pk)
+        return Response(self.get_serializer(patient).data, status=status.HTTP_201_CREATED)
 
     @action(detail=False, methods=['post', 'delete'], url_path='clear-all')
     def clear_all(self, request):
-        """Clears all patient records, wound profiles, and scans from the database."""
-        WoundAssessmentScan.objects.all().delete()
-        WoundProfile.objects.all().delete()
-        Patient.objects.all().delete()
-        return Response(
-            {"message": "All patient records and scans cleared successfully.", "count": 0},
-            status=status.HTTP_200_OK
-        )
+        """Deletes this clinician's own patients (and their wounds and scans) only."""
+        count, _ = Patient.objects.filter(owner=request.user).delete()
+        return Response({"message": "Your patient records were cleared.", "count": count}, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['post'], url_path='seed-demo')
     def seed_demo(self, request):
-        """Seeds the manuscript demo patients and scans into the database."""
+        """Seeds the demo patients into this clinician's own registry."""
         from django.core.management import call_command
-        try:
-            call_command('seed_data')
-        except Exception as e:
-            pass
-        patients = Patient.objects.all().prefetch_related('scans', 'wounds').order_by('-created_at')
-        serializer = self.get_serializer(patients, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        call_command('seed_data', owner=request.user.username)
+        return Response(self.get_serializer(self.get_queryset(), many=True).data, status=status.HTTP_200_OK)
 
 
+# ---------------------------------------------------------------------------
+# AI analysis
+# ---------------------------------------------------------------------------
 class AnalyzeWoundAPIView(APIView):
     """
     POST /api/scans/analyze/
-    Accepts wound photograph and runs 4-stage AI pipeline.
+    Runs the AI pipeline on a wound photo. Nothing is saved; the client saves the
+    accepted result through POST /api/scans/.
     """
+    permission_classes = [IsAuthenticated]
+
     def post(self, request, *args, **kwargs):
-        patient_id = request.data.get('patient_id') or request.data.get('patientId')
-        wound_id = request.data.get('wound_id') or request.data.get('woundProfileId') or request.data.get('wound_profile_id')
-        image_base64 = request.data.get('image_base64') or request.data.get('image')
-        baseline_image_base64 = request.data.get('baseline_image_base64') or request.data.get('baselineImage') or request.data.get('baseline_image')
+        data = request.data
         image_file = request.FILES.get('image_file')
+        image_base64 = data.get('image_base64') or data.get('image')
+        if image_file is None and not image_base64:
+            return Response({"detail": "A wound photo is required."}, status=status.HTTP_400_BAD_REQUEST)
 
-        patient = None
-        if patient_id is not None:
-            try:
-                patient_str = str(patient_id).strip()
-                if patient_str.isdigit():
-                    patient = Patient.objects.filter(models.Q(id=int(patient_str)) | models.Q(custom_id=patient_str)).first()
-                else:
-                    patient = Patient.objects.filter(custom_id=patient_str).first()
-            except Exception:
-                patient = None
+        patient_id = data.get('patient_id') or data.get('patientId')
+        patient = wound_profile = None
+        if patient_id not in (None, ""):
+            patient = _owned_patient(request, patient_id)
+            wound_profile = _patient_wound(
+                patient, data.get('wound_id') or data.get('woundProfileId') or data.get('wound_profile_id')
+            )
 
-        wound_profile = None
-        if patient and wound_id:
-            try:
-                wound_profile = patient.wounds.filter(id=wound_id).first()
-            except Exception:
-                wound_profile = None
-        if patient and not wound_profile:
-            wound_profile = patient.wounds.first()
-
-        result = run_ai_inference_pipeline(
-            image_file=image_file,
-            image_base64=image_base64,
-            patient=patient,
-            wound_profile=wound_profile,
-            baseline_image=baseline_image_base64
-        )
-
+        try:
+            result = run_ai_inference_pipeline(
+                image_file=image_file,
+                image_base64=image_base64,
+                patient=patient,
+                wound_profile=wound_profile,
+                baseline_image=data.get('baseline_image_base64') or data.get('baselineImage') or data.get('baseline_image'),
+            )
+        except ValueError as e:
+            # unusable photo (no wound found, unreadable image): tell the user, don't guess
+            return Response({"detail": str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
         return Response(result, status=status.HTTP_200_OK)
 
 
+# ---------------------------------------------------------------------------
+# scans
+# ---------------------------------------------------------------------------
 class WoundAssessmentScanViewSet(viewsets.ModelViewSet):
-    queryset = WoundAssessmentScan.objects.all()
     serializer_class = WoundAssessmentScanSerializer
+    permission_classes = [IsAuthenticated]
+    http_method_names = ['get', 'post', 'delete', 'head', 'options']
+
+    def get_queryset(self):
+        return WoundAssessmentScan.objects.filter(patient__owner=self.request.user)
 
     def create(self, request, *args, **kwargs):
         data = request.data
-        patient_id = data.get('patient_id') or data.get('patientId')
-        wound_id = data.get('wound_id') or data.get('woundProfileId') or data.get('wound_profile_id')
-        
-        patient = get_object_or_404(Patient, custom_id=patient_id)
-        
-        # Determine specific wound profile
-        wound_profile = None
-        if wound_id:
-            try:
-                wound_profile = patient.wounds.filter(id=wound_id).first()
-            except Exception:
-                wound_profile = None
-        
-        if not wound_profile:
-            wound_profile = patient.wounds.first()
+        patient = _owned_patient(request, data.get('patient_id') or data.get('patientId'))
+        wound_profile = _patient_wound(patient, data.get('wound_id') or data.get('woundProfileId') or data.get('wound_profile_id'))
+        if wound_profile is None:
+            loc = data.get('anatomical_location', data.get('location', 'Lower Extremity'))
+            wound_profile = WoundProfile.objects.create(patient=patient, label=loc, anatomical_location=loc, wound_type=PENDING_TYPE)
 
-        # If patient has no wound profile yet, create one
-        if not wound_profile:
-            wound_type_init = data.get('wound_type', data.get('woundType', 'Diabetic Wound'))
-            loc_init = data.get('anatomical_location', data.get('location', 'Lower Extremity'))
-            wound_profile = WoundProfile.objects.create(
-                patient=patient,
-                label=f"{loc_init} Wound",
-                wound_type=wound_type_init,
-                anatomical_location=loc_init,
-                status='AWAITING SCAN',
-            )
+        try:
+            severity_score = int(data.get('severity_score', data.get('severityScore')))
+        except (TypeError, ValueError):
+            return Response({"severity_score": ["A severity score from 1 to 5 is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        if not 1 <= severity_score <= 5:
+            return Response({"severity_score": ["Severity must be between 1 and 5."]}, status=status.HTTP_400_BAD_REQUEST)
 
-        severity_score = int(data.get('severity_score', data.get('severityScore', 3)))
         severity_level = data.get('severity_level', data.get('severityLevel', 'Moderate'))
         healing_status = data.get('healing_status', data.get('healingStatus', 'Stable'))
-        wound_type = data.get('wound_type', data.get('woundType', wound_profile.wound_type if wound_profile else 'Diabetic Ulcer'))
-        location = data.get('anatomical_location', data.get('location', wound_profile.anatomical_location if wound_profile else 'Lower Extremity'))
-        recommendation = data.get('recommendation', data.get('aiRecommendation', 'Daily monitoring advised.'))
-        image_base64 = data.get('image_base64', data.get('image', ''))
-        image_file = request.FILES.get('image_file')
+        wound_type = data.get('wound_type', data.get('woundType')) or wound_profile.wound_type
+        location = data.get('anatomical_location', data.get('location')) or wound_profile.anatomical_location
+        recommendation = data.get('recommendation', data.get('aiRecommendation', ''))
+        tissue_stats = data.get('tissue_stats', data.get('tissueStats')) or {}
+        if not isinstance(tissue_stats, dict):
+            tissue_stats = {}
 
-        tissue_stats = data.get('tissue_stats', data.get('tissueStats', {}))
-        granulation = float(tissue_stats.get('granulation', 50.0))
-        slough = float(tissue_stats.get('slough', 35.0))
-        necrotic = float(tissue_stats.get('necrotic', 15.0))
-
-        scan_date_formatted = data.get('scan_date_formatted') or data.get('scanDateFormatted') or "Today"
-        custom_date_str = data.get('scan_date') or data.get('scanDate')
-
-        # Mark previous scans of this wound profile as is_latest = False
-        if wound_profile:
-            wound_profile.scans.update(is_latest=False)
-        else:
-            patient.scans.update(is_latest=False)
-
-        # Create new scan
-        scan = WoundAssessmentScan.objects.create(
-            patient=patient,
-            wound_profile=wound_profile,
-            image=image_file,
-            image_base64=image_base64,
-            severity_score=severity_score,
-            severity_level=severity_level,
-            healing_status=healing_status,
-            wound_type=wound_type,
-            anatomical_location=location,
-            recommendation=recommendation,
-            granulation_percent=granulation,
-            slough_percent=slough,
-            necrotic_percent=necrotic,
-            is_latest=True,
-            scan_date_formatted=scan_date_formatted
-        )
-
-        if custom_date_str:
+        def pct(key, default):
             try:
-                from django.utils.dateparse import parse_datetime
-                parsed_dt = parse_datetime(custom_date_str)
-                if parsed_dt:
-                    scan.scan_date = parsed_dt
-                    scan.save(update_fields=['scan_date'])
-            except Exception as e:
-                pass
+                return float(tissue_stats.get(key, default))
+            except (TypeError, ValueError):
+                return default
 
-        # Update specific wound profile
-        if wound_profile:
+        area = data.get('wound_area_ratio')
+        try:
+            area = float(area) if area not in (None, "") else None
+        except (TypeError, ValueError):
+            area = None
+
+        image_bytes, ext = _decode_image(data.get('image_base64', data.get('image', '')))
+        scan_date_formatted = data.get('scan_date_formatted') or data.get('scanDateFormatted') or "Today"
+        parsed_date = parse_datetime(data.get('scan_date') or data.get('scanDate') or "") if (data.get('scan_date') or data.get('scanDate')) else None
+
+        with transaction.atomic():
+            wound_profile.scans.update(is_latest=False)
+            scan = WoundAssessmentScan(
+                patient=patient,
+                wound_profile=wound_profile,
+                severity_score=severity_score,
+                severity_level=severity_level,
+                healing_status=healing_status,
+                wound_type=wound_type,
+                anatomical_location=location,
+                recommendation=recommendation,
+                granulation_percent=pct('granulation', 0.0),
+                slough_percent=pct('slough', 0.0),
+                necrotic_percent=pct('necrotic', 0.0),
+                wound_area_ratio=area,
+                is_latest=True,
+                scan_date_formatted=scan_date_formatted,
+            )
+            if request.FILES.get('image_file'):
+                scan.image = request.FILES['image_file']
+            elif image_bytes:
+                scan.image.save(f"scan_{uuid.uuid4().hex}.{ext}", ContentFile(image_bytes), save=False)
+            scan.save()
+            if parsed_date:
+                WoundAssessmentScan.objects.filter(pk=scan.pk).update(scan_date=parsed_date)
+                scan.refresh_from_db()
+
             wound_profile.wound_type = wound_type
             wound_profile.current_severity = severity_score
             wound_profile.current_severity_label = severity_level
             wound_profile.healing_status = healing_status
             wound_profile.ai_recommendation = recommendation
             wound_profile.last_updated = scan_date_formatted
-            wound_profile.status = "ACTION NEEDED" if severity_score >= 4 else "IMPROVING" if healing_status == "Improving" else "STABLE"
-            wound_profile.status_type = "danger" if severity_score >= 4 else "success"
+            wound_profile.status, wound_profile.status_type = _wound_status(severity_score, healing_status)
             wound_profile.save()
 
-        serializer = self.get_serializer(scan)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(self.get_serializer(scan).data, status=status.HTTP_201_CREATED)
 
 
 class TreatmentGuidelineViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = TreatmentGuideline.objects.all()
     serializer_class = TreatmentGuidelineSerializer
+    permission_classes = [IsAuthenticated]

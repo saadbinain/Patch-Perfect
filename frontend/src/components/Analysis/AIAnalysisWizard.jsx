@@ -44,11 +44,12 @@ const getPatientId = (p) => (p ? p.id || p.custom_id : null);
 const getSimilarity = (result) =>
   result?.pipelineResults?.similarityCheck || result?.similarityCheck || {};
 
-const isSimilarityMismatch = (sim) =>
-  sim.isSameWound === false ||
-  sim.is_same_wound === false ||
-  (sim.similarityScore !== undefined && sim.similarityScore < 0.65) ||
-  (sim.similarity_score !== undefined && sim.similarity_score < 0.65);
+// A baseline scan has no score (null); only a real numeric score below threshold is a mismatch
+const isSimilarityMismatch = (sim) => {
+  if (sim.isBaseline || sim.is_baseline) return false;
+  const score = typeof sim.similarityScore === "number" ? sim.similarityScore : sim.similarity_score;
+  return sim.isSameWound === false || sim.is_same_wound === false || (typeof score === "number" && score < 0.65);
+};
 
 // Colour result tiles by what they actually say, not a fixed colour per tile
 const toneFor = (kind, value, score) => {
@@ -68,7 +69,7 @@ const toneFor = (kind, value, score) => {
     const v = String(value || "").toLowerCase();
     if (/deteriorat|worse|declin/.test(v)) return tones.danger;
     if (/improv|heal/.test(v)) return tones.success;
-    if (/stable/.test(v)) return tones.neutral;
+    if (/stable|baseline/.test(v)) return tones.neutral;
     return tones.warning;
   }
   return tones.neutral;
@@ -123,6 +124,9 @@ export const AIAnalysisWizard = ({
   const [analysisResult, setAnalysisResult] = useState(null);
   const [mismatchAcknowledged, setMismatchAcknowledged] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [analysisError, setAnalysisError] = useState("");
+  const [saveError, setSaveError] = useState("");
+  const [woundError, setWoundError] = useState("");
 
   // Assessment date (defaults to now; shift shortcuts only in date-simulation/demo mode)
   const [scanDate, setScanDate] = useState(getEffectiveDate());
@@ -180,18 +184,24 @@ export const AIAnalysisWizard = ({
     const location = newWoundLocation.trim();
     if (!location || !selectedPatient) return;
     setIsSavingWound(true);
-    const res = await api.addWoundToPatient(getPatientId(selectedPatient), {
-      anatomicalLocation: location,
-      woundType: "Pending AI Scan",
-      label: location,
-    });
-    // Refresh first so the new wound exists in the list before we select it
-    if (onRefreshPatients) await onRefreshPatients();
-    const latestWound = res?.wounds?.[res.wounds.length - 1];
-    if (latestWound) setSelectedWoundId(latestWound.id);
-    setIsSavingWound(false);
-    setIsAddingWound(false);
-    setNewWoundLocation("");
+    setWoundError("");
+    try {
+      const res = await api.addWoundToPatient(getPatientId(selectedPatient), {
+        anatomicalLocation: location,
+        woundType: "Pending AI Scan",
+        label: location,
+      });
+      // Refresh first so the new wound exists in the list before we select it
+      if (onRefreshPatients) await onRefreshPatients();
+      const latestWound = res?.wounds?.[res.wounds.length - 1];
+      if (latestWound) setSelectedWoundId(latestWound.id);
+      setIsAddingWound(false);
+      setNewWoundLocation("");
+    } catch (err) {
+      setWoundError(err.message || "Could not add the wound site.");
+    } finally {
+      setIsSavingWound(false);
+    }
   };
 
   // Date helpers
@@ -219,23 +229,38 @@ export const AIAnalysisWizard = ({
     if (!imagePreview || !selectedPatient) return;
     setIsAnalyzing(true);
     setAnalysisResult(null);
+    setAnalysisError("");
+    setSaveError("");
     setMismatchAcknowledged(false);
     setCurrentStep(3);
 
-    const delays = [450, 550, 450];
-    for (let i = 0; i < delays.length; i++) {
-      setStageIndex(i);
-      await new Promise((r) => setTimeout(r, delays[i]));
+    // Stage list advances while the request runs; the real work happens server-side
+    let cancelled = false;
+    const ticker = (async () => {
+      for (let i = 0; i < 3 && !cancelled; i++) {
+        setStageIndex(i);
+        await new Promise((r) => setTimeout(r, 900));
+      }
+      if (!cancelled) setStageIndex(3);
+    })();
+    try {
+      const result = await api.analyzeWound(imagePreview, selectedPatient, selectedWound?.id ?? null);
+      cancelled = true;
+      await ticker;
+      setStageIndex(4);
+      setAnalysisResult(result);
+    } catch (err) {
+      cancelled = true;
+      setAnalysisError(err.message || "The analysis failed. Please try again.");
+    } finally {
+      setIsAnalyzing(false);
     }
-    setStageIndex(3);
-    const result = await api.analyzeWound(imagePreview, selectedPatient, selectedWound?.id ?? null);
-    setStageIndex(4);
-    setAnalysisResult(result);
-    setIsAnalyzing(false);
   };
 
   const handleRetake = () => {
     setAnalysisResult(null);
+    setAnalysisError("");
+    setSaveError("");
     setImagePreview(null);
     setStageIndex(-1);
     setMismatchAcknowledged(false);
@@ -249,14 +274,21 @@ export const AIAnalysisWizard = ({
   const handleSave = async () => {
     if (!canSave || !onSaveAndReturn) return;
     setIsSaving(true);
-    if (onDirtyChange) onDirtyChange(false);
-    await onSaveAndReturn(
-      getPatientId(selectedPatient),
-      analysisResult,
-      imagePreview,
-      scanDate,
-      selectedWound?.id ?? null
-    );
+    setSaveError("");
+    try {
+      await onSaveAndReturn(
+        getPatientId(selectedPatient),
+        analysisResult,
+        imagePreview,
+        scanDate,
+        selectedWound?.id ?? null
+      );
+      if (onDirtyChange) onDirtyChange(false);
+    } catch (err) {
+      // Keep the result on screen so nothing is lost; the user can retry
+      setSaveError(err.message || "Saving failed. Please try again.");
+      setIsSaving(false);
+    }
   };
 
   const woundName = getWoundLabel(selectedWound, selectedPatient?.anatomicalLocation || "Wound Site");
@@ -573,6 +605,11 @@ export const AIAnalysisWizard = ({
                   {isSavingWound ? "Saving..." : "Add site"}
                 </button>
               </div>
+              {woundError && (
+                <p role="alert" style={{ fontSize: "0.74rem", color: "#B91C1C", marginTop: "6px", fontWeight: 600 }}>
+                  {woundError}
+                </p>
+              )}
             </div>
           )}
 
@@ -754,6 +791,51 @@ export const AIAnalysisWizard = ({
     </div>
   );
 
+  const renderAnalysisError = () => (
+    <div className="app-card" role="alert" style={{ padding: "20px 18px", display: "flex", flexDirection: "column", gap: "12px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+        <AlertTriangle size={20} color="#DC2626" />
+        <strong style={{ fontSize: "0.98rem", color: "#991B1B" }}>Analysis couldn't be completed</strong>
+      </div>
+      <p style={{ fontSize: "0.85rem", color: "#334155", lineHeight: 1.45 }}>{analysisError}</p>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px" }}>
+        <button type="button" className="btn-secondary" onClick={handleRetake}>
+          <Camera size={16} />
+          <span>Retake photo</span>
+        </button>
+        <button type="button" className="btn-primary" onClick={handleStartAnalysis}>
+          <RefreshCw size={16} />
+          <span>Try again</span>
+        </button>
+      </div>
+    </div>
+  );
+
+  const renderWarnings = () => {
+    const warnings = analysisResult?.warnings || [];
+    if (warnings.length === 0) return null;
+    return (
+      <div
+        style={{
+          background: "#FFFBEB",
+          border: "1px solid #FDE68A",
+          borderRadius: "12px",
+          padding: "10px 12px",
+          display: "flex",
+          flexDirection: "column",
+          gap: "4px",
+        }}
+      >
+        {warnings.map((w) => (
+          <div key={w} style={{ display: "flex", gap: "6px", fontSize: "0.78rem", color: "#78350F", fontWeight: 600, lineHeight: 1.4 }}>
+            <AlertTriangle size={14} color="#D97706" style={{ flexShrink: 0, marginTop: "2px" }} />
+            <span>{w}</span>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
   const renderSimilarityBanner = () => {
     if (isMismatch) {
       return (
@@ -814,7 +896,11 @@ export const AIAnalysisWizard = ({
           {isBaseline ? (
             <>First scan of <strong>{woundName}</strong> — saved as the Day 1 baseline for future comparisons.</>
           ) : (
-            <>Matches the {woundName} baseline{sim.confidence ? ` (${sim.confidence})` : ""}.</>
+            sim.is_same_wound === null || sim.isSameWound === null ? (
+              <>Not compared with the Day 1 photo.</>
+            ) : (
+              <>Matches the {woundName} baseline{sim.confidence ? ` (${sim.confidence})` : ""}.</>
+            )
           )}
         </span>
       </div>
@@ -833,6 +919,7 @@ export const AIAnalysisWizard = ({
 
     return (
       <div className="app-card" style={{ padding: "18px 16px", display: "flex", flexDirection: "column", gap: "16px" }}>
+        {renderWarnings()}
         {renderSimilarityBanner()}
 
         <div style={{ display: "flex", justifyContent: "center" }}>
@@ -878,6 +965,12 @@ export const AIAnalysisWizard = ({
           <strong style={{ color: "#0F172A" }}>{formatDisplayDate(scanDate, true)}</strong>
         </div>
 
+        {saveError && (
+          <div role="alert" style={{ background: "#FEF2F2", border: "1px solid #FECDD3", color: "#991B1B", borderRadius: "10px", padding: "9px 12px", fontSize: "0.8rem", fontWeight: 600 }}>
+            {saveError}
+          </div>
+        )}
+
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: "10px" }}>
           <button type="button" onClick={handleRetake} className="btn-secondary" style={{ fontSize: "0.85rem", padding: "12px 8px" }}>
             <Camera size={16} />
@@ -906,7 +999,7 @@ export const AIAnalysisWizard = ({
       {currentStep === 3 && (
         <>
           {renderContextSummary()}
-          {isAnalyzing || !analysisResult ? renderAnalyzing() : renderResult()}
+          {analysisError ? renderAnalysisError() : isAnalyzing || !analysisResult ? renderAnalyzing() : renderResult()}
         </>
       )}
     </div>

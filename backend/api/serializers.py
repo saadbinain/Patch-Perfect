@@ -89,11 +89,17 @@ class LoginSerializer(serializers.Serializer):
 
 class WoundAssessmentScanSerializer(serializers.ModelSerializer):
     tissue_stats = serializers.SerializerMethodField()
+    # Server-relative URL ("/media/wound_images/..."): works through the dev proxy and
+    # is resolved against the API host by the native app. Photos are no longer inlined as base64.
+    image = serializers.SerializerMethodField()
+
+    def get_image(self, obj):
+        return obj.image.url if obj.image else None
 
     class Meta:
         model = WoundAssessmentScan
         fields = [
-            'id', 'patient', 'wound_profile', 'image', 'image_base64',
+            'id', 'patient', 'wound_profile', 'image', 'wound_area_ratio',
             'severity_score', 'severity_level', 'healing_status',
             'wound_type', 'anatomical_location', 'recommendation',
             'granulation_percent', 'slough_percent', 'necrotic_percent',
@@ -170,7 +176,7 @@ class PatientSerializer(serializers.ModelSerializer):
     def get_wound_profile(self, obj):
         pw = self.get_primary_wound(obj)
         if pw:
-            return WoundProfileSerializer(pw).data
+            return WoundProfileSerializer(pw, context=self.context).data
         return None
 
     def get_woundType(self, obj):

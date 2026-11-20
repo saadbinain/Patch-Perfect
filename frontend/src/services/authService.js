@@ -1,6 +1,32 @@
+import { API_BASE, ApiError, OFFLINE_MESSAGE, errorMessageFrom } from "./apiConfig";
+
 const TOKEN_KEY = "patch_perfect_auth_token";
 const USER_KEY = "patch_perfect_auth_user";
-const BACKEND_BASE_URL = import.meta.env.VITE_API_URL || "/api";
+const BACKEND_BASE_URL = API_BASE;
+// Demo sessions (and legacy offline "local-token" sessions) never touch the server
+const DEMO_TOKEN_PREFIXES = ["demo-session-", "local-token-"];
+
+// POST JSON to an auth endpoint; network failures become a clear "can't reach server" error
+const postAuth = async (path, body) => {
+  let res;
+  try {
+    res = await fetch(`${BACKEND_BASE_URL}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError(OFFLINE_MESSAGE, 0);
+  }
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+  if (!res.ok) throw new ApiError(errorMessageFrom(data, res.status), res.status);
+  return data;
+};
 
 export const authService = {
   // Get stored token
@@ -20,6 +46,12 @@ export const authService = {
     } catch {
       return null;
     }
+  },
+
+  // Demo sessions use simulated AI and data stored only in this browser
+  isDemoSession: () => {
+    const token = authService.getToken();
+    return Boolean(token && DEMO_TOKEN_PREFIXES.some((prefix) => token.startsWith(prefix)));
   },
 
   // Check if session is currently active
@@ -51,98 +83,22 @@ export const authService = {
 
   // User Registration
   register: async ({ username, email, password, full_name, role }) => {
-    try {
-      const res = await fetch(`${BACKEND_BASE_URL}/auth/register/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          username: username.trim(),
-          email: (email || "").trim(),
-          password,
-          full_name: (full_name || "").trim(),
-          role: (role || "Clinician").trim(),
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        const errorMsg =
-          data.username?.[0] ||
-          data.password?.[0] ||
-          data.non_field_errors?.[0] ||
-          data.detail ||
-          "Registration failed. Please check your details.";
-        throw new Error(errorMsg);
-      }
-
-      const { token, user } = data;
-      authService.setAuthSession(token, user);
-      return { token, user };
-    } catch (err) {
-      // If backend is offline or network fails, provide local registration session
-      if (err.message && !err.message.includes("Failed to fetch") && !err.message.includes("NetworkError")) {
-        throw err;
-      }
-
-      console.warn("Backend auth unavailable, creating local offline clinician profile.");
-      const fallbackUser = {
-        id: Date.now(),
-        username: username.trim(),
-        email: (email || "").trim(),
-        full_name: (full_name || username).trim(),
-        role: role || "Clinician",
-        date_joined: new Date().toISOString(),
-      };
-      const fallbackToken = `local-token-${Date.now()}`;
-      authService.setAuthSession(fallbackToken, fallbackUser);
-      return { token: fallbackToken, user: fallbackUser };
-    }
+    const { token, user } = await postAuth("/auth/register/", {
+      username: username.trim(),
+      email: (email || "").trim(),
+      password,
+      full_name: (full_name || "").trim(),
+      role: (role || "Clinician").trim(),
+    });
+    authService.setAuthSession(token, user);
+    return { token, user };
   },
 
   // User Login
   login: async (username, password) => {
-    try {
-      const res = await fetch(`${BACKEND_BASE_URL}/auth/login/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          username: username.trim(),
-          password,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        const errorMsg =
-          data.non_field_errors?.[0] ||
-          data.username?.[0] ||
-          data.password?.[0] ||
-          data.detail ||
-          "Invalid credentials. Please verify your username and password.";
-        throw new Error(errorMsg);
-      }
-
-      const { token, user } = data;
-      authService.setAuthSession(token, user);
-      return { token, user };
-    } catch (err) {
-      if (err.message && !err.message.includes("Failed to fetch") && !err.message.includes("NetworkError")) {
-        throw err;
-      }
-
-      console.warn("Backend auth offline, logging in locally.");
-      const fallbackUser = {
-        id: 1,
-        username: username.trim(),
-        email: `${username.trim()}@clinic.local`,
-        full_name: username.trim(),
-        role: "Clinician",
-        date_joined: new Date().toISOString(),
-      };
-      const fallbackToken = `local-token-${Date.now()}`;
-      authService.setAuthSession(fallbackToken, fallbackUser);
-      return { token: fallbackToken, user: fallbackUser };
-    }
+    const { token, user } = await postAuth("/auth/login/", { username: username.trim(), password });
+    authService.setAuthSession(token, user);
+    return { token, user };
   },
 
   // Quick One-Click Demo Clinician Login
@@ -165,7 +121,7 @@ export const authService = {
     const token = authService.getToken();
     if (!token) return null;
 
-    if (token.startsWith("local-token-") || token.startsWith("demo-session-")) {
+    if (authService.isDemoSession()) {
       return authService.getUser();
     }
 
@@ -196,7 +152,7 @@ export const authService = {
   // User Logout
   logout: async () => {
     const token = authService.getToken();
-    if (token && !token.startsWith("local-token-") && !token.startsWith("demo-session-")) {
+    if (token && !authService.isDemoSession()) {
       try {
         await fetch(`${BACKEND_BASE_URL}/auth/logout/`, {
           method: "POST",

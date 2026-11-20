@@ -27,6 +27,7 @@ class WoundComparator:
     def __init__(self):
         self.model = None
         self.transform = None
+        self.method = "colour-histogram"
         self._init_feature_extractor()
 
     def _init_feature_extractor(self):
@@ -50,6 +51,7 @@ class WoundComparator:
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
             ])
+            self.method = "resnet50"
             print("[OK] ResNet-50 deep feature extractor initialized successfully.")
         except Exception as e:
             print(f"[INFO] ResNet weights download skipped, using spatial color-texture embeddings: {e}")

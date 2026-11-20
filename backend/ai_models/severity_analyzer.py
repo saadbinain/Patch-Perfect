@@ -14,13 +14,18 @@ import numpy as np
 from PIL import Image
 
 
-def analyze_tissue_and_severity(image_input):
+def analyze_tissue_and_severity(image_input, region_mask=None):
     """
     Analyzes a wound image (PIL Image, OpenCV numpy array BGR, or file path/buffer)
     using HSV color thresholding to segment granulation, slough, and necrotic tissues.
     
+    region_mask: optional uint8 array (same HxW as the image, non-zero = wound).
+    When given, only pixels inside the wound are classified, so background,
+    shadows and surrounding skin are not counted as tissue.
+
     Returns:
         dict: {
+            "tissue_detected": bool (False if no tissue-coloured pixels were found),
             "wound_pixels": int,
             "wound_ratio": float,
             "granulation_pct": float,
@@ -70,6 +75,11 @@ def analyze_tissue_and_severity(image_input):
     mask_black = cv2.inRange(hsv, lower_black, upper_black)
 
     combined_mask = mask_red | mask_yellow | mask_black
+    if region_mask is not None:
+        region = (np.asarray(region_mask) > 0).astype(np.uint8) * 255
+        if region.shape[:2] != combined_mask.shape[:2]:
+            region = cv2.resize(region, (combined_mask.shape[1], combined_mask.shape[0]), interpolation=cv2.INTER_NEAREST)
+        combined_mask = cv2.bitwise_and(combined_mask, region)
 
     # Morphological noise removal
     kernel = np.ones((5, 5), np.uint8)
@@ -100,10 +110,8 @@ def analyze_tissue_and_severity(image_input):
             slough_pct = round(slough_pct * scale, 1)
             necrosis_pct = round(100.0 - granulation_pct - slough_pct, 1)
     else:
-        # Fallback if no specific tissue colors were segmented
-        granulation_pct = 60.0
-        slough_pct = 30.0
-        necrosis_pct = 10.0
+        # Nothing tissue-coloured was found: report that instead of inventing a breakdown
+        granulation_pct = slough_pct = necrosis_pct = 0.0
 
     # Severity level logic from the research model
     # CRITICAL: necrosis >= 50
@@ -141,6 +149,7 @@ def analyze_tissue_and_severity(image_input):
     }
 
     return {
+        "tissue_detected": wound_pixels > 0,
         "wound_pixels": wound_pixels,
         "wound_ratio": round(wound_ratio, 4),
         "granulation_pct": granulation_pct,
@@ -153,33 +162,31 @@ def analyze_tissue_and_severity(image_input):
     }
 
 
-def evaluate_healing_status(current_pixels, baseline_pixels=None, current_severity_score=3, baseline_severity_score=None):
+def evaluate_healing_status(current_area=None, baseline_area=None, current_severity_score=3,
+                            baseline_severity_score=None, is_baseline=False):
     """
-    Evaluates longitudinal healing status based on wound area change and severity progression.
-    Matches logic from research model:
-    - Change < -5% => HEALING / Improving
-    - Change > +5% => NOT HEALING / Deteriorating
-    - Within +/-5% => STALLED / Stable
+    Longitudinal healing status for one wound, relative to its Day 1 scan.
+
+    Areas are wound-area ratios (fraction of the photo covered by the wound mask),
+    so they are comparable between photos taken at a similar distance.
+    - First scan of a wound            -> "Baseline"
+    - Area change < -5%                -> "Improving"
+    - Area change > +5%                -> "Deteriorating"
+    - Otherwise / no area available    -> decided by severity change vs Day 1
     """
-    if baseline_pixels is None or baseline_pixels <= 0:
-        if current_severity_score <= 2:
+    if is_baseline:
+        return "Baseline"
+
+    if current_area and baseline_area and baseline_area > 0:
+        area_change = (current_area - baseline_area) / baseline_area
+        if area_change < -0.05:
             return "Improving"
-        elif current_severity_score == 3:
-            return "Stable"
-        else:
+        if area_change > 0.05:
             return "Deteriorating"
 
-    area_change = (current_pixels - baseline_pixels) / baseline_pixels
-
-    if area_change < -0.05:
-        return "Improving"
-    elif area_change > 0.05:
-        return "Deteriorating"
-    else:
-        # If area is stalled, look at severity progression
-        if baseline_severity_score is not None:
-            if current_severity_score < baseline_severity_score:
-                return "Improving"
-            elif current_severity_score > baseline_severity_score:
-                return "Deteriorating"
-        return "Stable"
+    if baseline_severity_score is not None:
+        if current_severity_score < baseline_severity_score:
+            return "Improving"
+        if current_severity_score > baseline_severity_score:
+            return "Deteriorating"
+    return "Stable"

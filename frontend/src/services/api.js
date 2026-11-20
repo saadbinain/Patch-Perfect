@@ -1,21 +1,55 @@
-import { initialPatients, demoPatients } from "../data/mockPatients";
+import { demoPatients } from "../data/mockPatients";
 import { treatmentGuidelines } from "../data/mockGuidelines";
 import { simulateAIAnalysis } from "../data/mockAI";
 import { authService } from "./authService";
+import { API_BASE, ApiError, OFFLINE_MESSAGE, errorMessageFrom } from "./apiConfig";
+import { formatDisplayDate, getEffectiveDate } from "./dateService";
 
-const BACKEND_BASE_URL = import.meta.env.VITE_API_URL || "/api";
+export { ApiError };
+
+// Demo sessions keep their (sample) data in this browser only.
 const STORAGE_KEY_PATIENTS = "patch_perfect_patients_v1";
 
-const getAuthHeaders = () => {
+const isDemo = () => authService.isDemoSession();
+
+/**
+ * Real (signed-in) sessions talk to the server only. Failures throw ApiError with a
+ * readable message instead of silently switching to local or simulated data.
+ */
+const request = async (path, { method = "GET", body } = {}) => {
   const headers = { "Content-Type": "application/json" };
   const token = authService.getToken();
-  if (token && !token.startsWith("local-token-") && !token.startsWith("demo-session-")) {
-    headers["Authorization"] = `Token ${token}`;
+  if (token) headers.Authorization = `Token ${token}`;
+
+  let res;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+  } catch {
+    throw new ApiError(OFFLINE_MESSAGE, 0);
   }
-  return headers;
+
+  let data = null;
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+
+  if (res.status === 401) {
+    authService.clearAuthSession();
+    throw new ApiError("Your session has expired. Please sign in again.", 401);
+  }
+  if (!res.ok) throw new ApiError(errorMessageFrom(data, res.status), res.status);
+  return data;
 };
 
-// Helpers for localStorage fallback persistence
+// ---------------------------------------------------------------------------
+// localStorage persistence (demo sessions only)
+// ---------------------------------------------------------------------------
 const getStoredPatients = () => {
   try {
     const data = localStorage.getItem(STORAGE_KEY_PATIENTS);
@@ -34,7 +68,13 @@ const saveStoredPatients = (patients) => {
   }
 };
 
-import { formatDisplayDate, getEffectiveDate } from "./dateService";
+export const clearLocalPatientCache = () => {
+  try {
+    localStorage.removeItem(STORAGE_KEY_PATIENTS);
+  } catch {
+    /* ignore */
+  }
+};
 
 // Normalise tissue percentages from any result shape (backend metrics, mock pipeline, legacy)
 export const extractTissueStats = (scanResult) => {
@@ -45,51 +85,30 @@ export const extractTissueStats = (scanResult) => {
   const legacy = src.tissueAnalysis || {};
   const pick = (...vals) => vals.find((v) => typeof v === "number");
   return {
-    granulation: pick(src.granulation, legacy.granulationPercent, ta.granulationPercent, pr.granulation) ?? 50,
-    slough: pick(src.slough, legacy.sloughPercent, ta.sloughPercent, pr.slough) ?? 35,
-    necrotic: pick(src.necrotic, legacy.necroticPercent, ta.necroticPercent, pr.necrotic) ?? 15,
+    granulation: pick(src.granulation, legacy.granulationPercent, ta.granulationPercent, pr.granulation) ?? 0,
+    slough: pick(src.slough, legacy.sloughPercent, ta.sloughPercent, pr.slough) ?? 0,
+    necrotic: pick(src.necrotic, legacy.necroticPercent, ta.necroticPercent, pr.necrotic) ?? 0,
   };
 };
 
-export const api = {
-  // Get all patient wound profiles
-  getPatients: async () => {
-    try {
-      const res = await fetch(`${BACKEND_BASE_URL}/patients/`, {
-        headers: getAuthHeaders(),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data)) {
-          saveStoredPatients(data);
-          return data;
-        }
-      }
-    } catch (e) {
-      console.warn("Django backend unreachable, using local database cache.", e);
-    }
-    return getStoredPatients();
-  },
+const statusFor = (severityScore, healingStatus) => {
+  if (severityScore >= 4) return { status: "ACTION NEEDED", statusType: "danger" };
+  if (healingStatus === "Deteriorating") return { status: "DETERIORATING", statusType: "warning" };
+  if (healingStatus === "Improving") return { status: "IMPROVING", statusType: "success" };
+  return { status: "STABLE", statusType: "info" };
+};
 
-  // Add a new patient profile
-  createPatient: async (patientData) => {
-    try {
-      const res = await fetch(`${BACKEND_BASE_URL}/patients/`, {
-        method: "POST",
-        headers: getAuthHeaders(),
-        body: JSON.stringify(patientData),
-      });
-      if (res.ok) {
-        const created = await res.json();
-        return created;
-      }
-    } catch (e) {
-      console.warn("Failed to create patient on Django backend, saving locally.", e);
-    }
-
-    // Local fallback
+// ---------------------------------------------------------------------------
+// demo-only local implementations
+// ---------------------------------------------------------------------------
+const local = {
+  createPatient: (patientData) => {
     const existing = getStoredPatients();
-    const newId = String(Math.floor(100 + Math.random() * 900));
+    const taken = new Set(existing.map((p) => String(p.id || p.custom_id)));
+    let newId;
+    do {
+      newId = String(Math.floor(100 + Math.random() * 900));
+    } while (taken.has(newId) && taken.size < 900);
     const effectiveDate = getEffectiveDate();
     const anatomicalLocation = patientData.anatomicalLocation || "Lower Extremity";
     const woundType = patientData.woundType || "Pending AI Scan";
@@ -104,7 +123,8 @@ export const api = {
       current_severity: null,
       current_severity_label: "Awaiting Scan",
       healing_status: "Not Assessed",
-      ai_recommendation: "New patient profile registered. Capture or upload a wound photograph to run AI segmentation and severity scoring.",
+      ai_recommendation:
+        "New patient profile registered. Capture or upload a wound photograph to run AI segmentation and severity scoring.",
       scans: [],
       trend_data: [],
     };
@@ -120,8 +140,8 @@ export const api = {
       emergency_contact: patientData.emergencyContact || "N/A",
       allergies: patientData.allergies || "None",
       notes: patientData.notes || "",
-      woundType: woundType,
-      anatomicalLocation: anatomicalLocation,
+      woundType,
+      anatomicalLocation,
       status: "AWAITING SCAN",
       statusType: "warning",
       lastUpdated: formatDisplayDate(effectiveDate, false),
@@ -134,40 +154,22 @@ export const api = {
       trend_data: [],
       scans: [],
     };
-    const updated = [newPatient, ...existing];
-    saveStoredPatients(updated);
+    saveStoredPatients([newPatient, ...existing]);
     return newPatient;
   },
 
-  // Add a new wound site to an existing patient
-  addWoundToPatient: async (patientId, woundData) => {
-    try {
-      const res = await fetch(`${BACKEND_BASE_URL}/patients/${patientId}/add-wound/`, {
-        method: "POST",
-        headers: getAuthHeaders(),
-        body: JSON.stringify(woundData),
-      });
-      if (res.ok) {
-        const updatedPatient = await res.json();
-        return updatedPatient;
-      }
-    } catch (e) {
-      console.warn("Failed to add wound on Django backend, updating local state.", e);
-    }
-
-    // Local fallback
+  addWoundToPatient: (patientId, woundData) => {
     const patients = getStoredPatients();
     const targetIdx = patients.findIndex((p) => (p.id || p.custom_id) === patientId);
-    if (targetIdx === -1) return null;
+    if (targetIdx === -1) throw new ApiError("Patient not found.", 404);
 
     const patient = { ...patients[targetIdx] };
     const effectiveDate = getEffectiveDate();
     const anatomicalLocation = woundData.anatomicalLocation || woundData.anatomical_location || "Lower Extremity";
-    const woundType = woundData.woundType || woundData.wound_type || "Pending AI Scan";
     const newWound = {
       id: Date.now(),
-      label: woundData.label || woundData.woundLabel || `${anatomicalLocation} Site`,
-      wound_type: woundType,
+      label: woundData.label || woundData.woundLabel || anatomicalLocation,
+      wound_type: woundData.woundType || woundData.wound_type || "Pending AI Scan",
       anatomical_location: anatomicalLocation,
       status: "AWAITING SCAN",
       status_type: "warning",
@@ -179,104 +181,21 @@ export const api = {
       scans: [],
       trend_data: [],
     };
-
     patient.wounds = [...(patient.wounds || []), newWound];
     patients[targetIdx] = patient;
     saveStoredPatients(patients);
     return patient;
   },
 
-  // Submit image for AI analysis
-  analyzeWound: async (imageDataUrl, patient, woundProfileId = null) => {
-    try {
-      const targetWound = patient?.wounds?.find((w) => w.id === woundProfileId);
-      const priorScans = targetWound?.scans?.length > 0 ? targetWound.scans : (patient?.scans || []);
-      const baselineImage = priorScans.length > 0 ? (priorScans[0].image || priorScans[0].image_base64 || null) : null;
-
-      const res = await fetch(`${BACKEND_BASE_URL}/scans/analyze/`, {
-        method: "POST",
-        headers: getAuthHeaders(),
-        body: JSON.stringify({
-          patient_id: patient?.id || patient?.custom_id,
-          wound_id: woundProfileId,
-          image_base64: imageDataUrl,
-          baseline_image_base64: baselineImage,
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const metrics = data.pipeline_metrics || {};
-        const tissueStats = metrics.tissue_stats || {
-          granulation: 50,
-          slough: 35,
-          necrotic: 15,
-        };
-        const similarityData = metrics.similarity || {
-          is_same_wound: true,
-          similarity_score: 1.0,
-          confidence: "100%",
-        };
-
-        return {
-          id: `scan-${Date.now()}`,
-          severityScore: data.severity_score,
-          severityLevel: data.severity_level,
-          woundType: data.wound_type,
-          healingStatus: data.healing_status,
-          recommendation: data.recommendation,
-          similarityCheck: similarityData,
-          pipelineResults: {
-            ...tissueStats,
-            similarityCheck: similarityData,
-            segmentation: metrics.segmentation,
-            classification: metrics.classification,
-          },
-        };
-      }
-    } catch (e) {
-      console.warn("Django AI analyze endpoint offline, running browser simulation.", e);
-    }
-    return simulateAIAnalysis(imageDataUrl, patient, woundProfileId);
-  },
-
-  // Save scan result to patient profile (and specific wound)
-  saveScanResult: async (patientId, scanResult, imagePreview, customDate = null, woundProfileId = null) => {
-    const scanDateObj = customDate ? (customDate instanceof Date ? customDate : new Date(customDate)) : getEffectiveDate();
+  saveScanResult: (patientId, scanResult, imagePreview, scanDateObj, woundProfileId) => {
     const formattedDate = formatDisplayDate(scanDateObj, true);
     const shortFormattedDate = formatDisplayDate(scanDateObj, false);
-
-    try {
-      const res = await fetch(`${BACKEND_BASE_URL}/scans/`, {
-        method: "POST",
-        headers: getAuthHeaders(),
-        body: JSON.stringify({
-          patient_id: patientId,
-          wound_id: woundProfileId,
-          severity_score: scanResult.severityScore,
-          severity_level: scanResult.severityLevel,
-          healing_status: scanResult.healingStatus,
-          wound_type: scanResult.woundType,
-          location: scanResult.location || "Lower Extremity",
-          recommendation: scanResult.recommendation,
-          image_base64: imagePreview,
-          tissue_stats: extractTissueStats(scanResult),
-          scan_date: scanDateObj.toISOString(),
-          scan_date_formatted: formattedDate,
-        }),
-      });
-      if (res.ok) {
-        const savedScan = await res.json();
-        return savedScan;
-      }
-    } catch (e) {
-      console.warn("Failed to persist scan on Django backend, caching locally.", e);
-    }
-
-    // Local fallback
     const patients = getStoredPatients();
     const targetIdx = patients.findIndex((p) => (p.id || p.custom_id) === patientId);
-    if (targetIdx === -1) return null;
+    if (targetIdx === -1) throw new ApiError("Patient not found.", 404);
 
+    const tissue = extractTissueStats(scanResult);
+    const { status, statusType } = statusFor(scanResult.severityScore, scanResult.healingStatus);
     const patient = { ...patients[targetIdx] };
     const newScanEntry = {
       id: scanResult.id,
@@ -295,48 +214,37 @@ export const api = {
       location: scanResult.location || patient.anatomicalLocation,
       anatomical_location: scanResult.location || patient.anatomicalLocation,
       recommendation: scanResult.recommendation,
-      tissueStats: extractTissueStats(scanResult),
-      granulation_percent: extractTissueStats(scanResult).granulation,
-      slough_percent: extractTissueStats(scanResult).slough,
-      necrotic_percent: extractTissueStats(scanResult).necrotic,
+      tissueStats: tissue,
+      granulation_percent: tissue.granulation,
+      slough_percent: tissue.slough,
+      necrotic_percent: tissue.necrotic,
       image: imagePreview,
       image_base64: imagePreview,
       isLatest: true,
       is_latest: true,
     };
 
-    // Update the matching wound in patient.wounds if found
     if (patient.wounds && patient.wounds.length > 0) {
       const woundIdx = woundProfileId ? patient.wounds.findIndex((w) => w.id === woundProfileId) : 0;
       const targetWoundIdx = woundIdx >= 0 ? woundIdx : 0;
       const targetWound = { ...patient.wounds[targetWoundIdx] };
-
+      targetWound.wound_type = scanResult.woundType || targetWound.wound_type;
       targetWound.current_severity = scanResult.severityScore;
       targetWound.current_severity_label = scanResult.severityLevel;
       targetWound.healing_status = scanResult.healingStatus;
       targetWound.ai_recommendation = scanResult.recommendation;
       targetWound.last_updated = shortFormattedDate;
-      targetWound.status =
-        scanResult.severityScore >= 4
-          ? "ACTION NEEDED"
-          : scanResult.healingStatus === "Improving"
-          ? "IMPROVING"
-          : "STABLE";
-      targetWound.status_type = scanResult.severityScore >= 4 ? "danger" : "success";
-
-      const updatedWoundScans = [
+      targetWound.status = status;
+      targetWound.status_type = statusType;
+      targetWound.scans = [
         newScanEntry,
         ...(targetWound.scans || []).map((s) => ({ ...s, is_latest: false, isLatest: false })),
       ];
-      targetWound.scans = updatedWoundScans;
-
-      const nextScanNum = (targetWound.trend_data?.length || 0) + 1;
       targetWound.trend_data = [
         ...(targetWound.trend_data || []),
-        { week: shortFormattedDate || `Scan ${nextScanNum}`, score: scanResult.severityScore },
+        { week: shortFormattedDate, score: scanResult.severityScore },
       ];
-
-      patient.wounds[targetWoundIdx] = targetWound;
+      patient.wounds = patient.wounds.map((w, i) => (i === targetWoundIdx ? targetWound : w));
     }
 
     patient.currentSeverity = scanResult.severityScore;
@@ -344,93 +252,122 @@ export const api = {
     patient.healingStatus = scanResult.healingStatus;
     patient.aiRecommendation = scanResult.recommendation;
     patient.lastUpdated = shortFormattedDate;
-    patient.status =
-      scanResult.severityScore >= 4
-        ? "ACTION NEEDED"
-        : scanResult.healingStatus === "Improving"
-        ? "IMPROVING"
-        : "STABLE";
-    patient.statusType = scanResult.severityScore >= 4 ? "danger" : "success";
-
-    const updatedScans = [
-      newScanEntry,
-      ...(patient.scans || []).map((s) => ({ ...s, isLatest: false, is_latest: false })),
-    ];
-    patient.scans = updatedScans;
-
-    const nextWeekIdx = (patient.trend_data?.length || patient.trendData?.length || 0) + 1;
+    patient.status = status;
+    patient.statusType = statusType;
+    patient.scans = [newScanEntry, ...(patient.scans || []).map((s) => ({ ...s, isLatest: false, is_latest: false }))];
     patient.trend_data = [
       ...(patient.trend_data || patient.trendData || []),
-      { week: shortFormattedDate || `Scan ${nextWeekIdx}`, score: scanResult.severityScore },
+      { week: shortFormattedDate, score: scanResult.severityScore },
     ];
 
     patients[targetIdx] = patient;
     saveStoredPatients(patients);
     return patient;
   },
+};
 
-  // Get treatment guidelines
-  getGuidelines: async () => {
-    try {
-      const res = await fetch(`${BACKEND_BASE_URL}/guidelines/`, {
-        headers: getAuthHeaders(),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) return data;
-      }
-    } catch (e) {
-      console.warn("Django guidelines endpoint offline, returning local guidelines.", e);
-    }
-    return treatmentGuidelines;
+// ---------------------------------------------------------------------------
+// public API
+// ---------------------------------------------------------------------------
+export const api = {
+  getPatients: async () => {
+    if (isDemo()) return getStoredPatients();
+    const data = await request("/patients/");
+    return Array.isArray(data) ? data : [];
   },
 
-  // Clear all data (new user state)
-  clearAllData: async () => {
-    try {
-      await fetch(`${BACKEND_BASE_URL}/patients/clear-all/`, {
-        method: "POST",
-        headers: getAuthHeaders(),
-      });
-    } catch (e) {
-      console.warn("Django clear-all endpoint unreachable, clearing local storage cache only.", e);
+  createPatient: async (patientData) => {
+    if (isDemo()) return local.createPatient(patientData);
+    return request("/patients/", { method: "POST", body: patientData });
+  },
+
+  addWoundToPatient: async (patientId, woundData) => {
+    if (isDemo()) return local.addWoundToPatient(patientId, woundData);
+    return request(`/patients/${encodeURIComponent(patientId)}/add-wound/`, { method: "POST", body: woundData });
+  },
+
+  // Run the AI pipeline on a photo. Demo sessions get clearly flagged simulated results.
+  analyzeWound: async (imageDataUrl, patient, woundProfileId = null) => {
+    if (isDemo()) {
+      const simulated = await simulateAIAnalysis(imageDataUrl, patient, woundProfileId);
+      return { ...simulated, simulated: true, warnings: ["Demo mode: these results are simulated, not real AI analysis."] };
     }
-    localStorage.removeItem(STORAGE_KEY_PATIENTS);
+
+    // The server compares against the wound's stored Day 1 scan itself.
+    const data = await request("/scans/analyze/", {
+      method: "POST",
+      body: {
+        patient_id: patient?.custom_id || patient?.id,
+        wound_id: woundProfileId,
+        image_base64: imageDataUrl,
+      },
+    });
+    const metrics = data.pipeline_metrics || {};
+    const similarityData = metrics.similarity || {};
+    return {
+      id: `scan-${Date.now()}`,
+      severityScore: data.severity_score,
+      severityLevel: data.severity_level,
+      woundType: data.wound_type,
+      healingStatus: data.healing_status,
+      recommendation: data.recommendation,
+      warnings: data.warnings || [],
+      tissueStats: metrics.tissue_stats,
+      similarityCheck: similarityData,
+      pipelineResults: {
+        ...(metrics.tissue_stats || {}),
+        similarityCheck: similarityData,
+        segmentation: metrics.segmentation,
+        classification: metrics.classification,
+        tissueMethod: metrics.tissue_method,
+      },
+    };
+  },
+
+  saveScanResult: async (patientId, scanResult, imagePreview, customDate = null, woundProfileId = null) => {
+    const scanDateObj = customDate ? (customDate instanceof Date ? customDate : new Date(customDate)) : getEffectiveDate();
+    if (isDemo()) return local.saveScanResult(patientId, scanResult, imagePreview, scanDateObj, woundProfileId);
+
+    return request("/scans/", {
+      method: "POST",
+      body: {
+        patient_id: patientId,
+        wound_id: woundProfileId,
+        severity_score: scanResult.severityScore,
+        severity_level: scanResult.severityLevel,
+        healing_status: scanResult.healingStatus,
+        wound_type: scanResult.woundType,
+        location: scanResult.location,
+        recommendation: scanResult.recommendation,
+        image_base64: imagePreview,
+        tissue_stats: extractTissueStats(scanResult),
+        wound_area_ratio: scanResult.pipelineResults?.segmentation?.wound_area_ratio ?? null,
+        scan_date: scanDateObj.toISOString(),
+        scan_date_formatted: formatDisplayDate(scanDateObj, true),
+      },
+    });
+  },
+
+  getGuidelines: async () => {
+    if (isDemo()) return treatmentGuidelines;
+    const data = await request("/guidelines/");
+    return Array.isArray(data) && data.length > 0 ? data : treatmentGuidelines;
+  },
+
+  // Delete this clinician's patients (server) or the demo data (local)
+  clearAllData: async () => {
+    if (!isDemo()) await request("/patients/clear-all/", { method: "POST" });
+    clearLocalPatientCache();
     return [];
   },
 
-  // Load sample demo data
+  // Load sample patients (into this clinician's own registry on the server)
   loadDemoData: async () => {
-    try {
-      const res = await fetch(`${BACKEND_BASE_URL}/patients/seed-demo/`, {
-        method: "POST",
-        headers: getAuthHeaders(),
-      });
-      if (res.ok) {
-        const seeded = await res.json();
-        if (Array.isArray(seeded)) {
-          saveStoredPatients(seeded);
-          return seeded;
-        }
-      }
-    } catch (e) {
-      console.warn("Django seed-demo endpoint unreachable, falling back to mock dataset.", e);
+    if (!isDemo()) {
+      const seeded = await request("/patients/seed-demo/", { method: "POST" });
+      return Array.isArray(seeded) ? seeded : [];
     }
     saveStoredPatients(demoPatients);
     return demoPatients;
-  },
-
-  // Reset to initial (empty)
-  resetDemoData: async () => {
-    try {
-      await fetch(`${BACKEND_BASE_URL}/patients/clear-all/`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-    } catch (e) {
-      console.warn("Django clear-all endpoint unreachable.", e);
-    }
-    localStorage.removeItem(STORAGE_KEY_PATIENTS);
-    return [];
   },
 };

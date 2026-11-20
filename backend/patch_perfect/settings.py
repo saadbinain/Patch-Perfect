@@ -10,6 +10,8 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
+import secrets
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -19,13 +21,19 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-!f*5@4y8zzhf@6o%^1qo2f^)dam_dow9vv^^y&u&=8g4zx$#@k'
+# Configure these with environment variables outside local development:
+#   DJANGO_SECRET_KEY, DJANGO_DEBUG=0, DJANGO_ALLOWED_HOSTS="example.com,10.0.0.5",
+#   DJANGO_CORS_ORIGINS="https://app.example.com"
+DEBUG = os.environ.get('DJANGO_DEBUG', '1') == '1'
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY')
+if not SECRET_KEY:
+    if not DEBUG:
+        raise RuntimeError("Set DJANGO_SECRET_KEY when DJANGO_DEBUG=0")
+    # Dev only: random per process (tokens are stored in the DB, so logins survive restarts)
+    SECRET_KEY = 'dev-insecure-' + secrets.token_urlsafe(40)
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = [h.strip() for h in os.environ.get('DJANGO_ALLOWED_HOSTS', '*' if DEBUG else 'localhost,127.0.0.1').split(',') if h.strip()]
 
 
 # Application definition
@@ -50,8 +58,9 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.TokenAuthentication',
         'rest_framework.authentication.SessionAuthentication',
     ],
+    # Every endpoint requires a logged-in clinician unless a view explicitly opts out
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',
+        'rest_framework.permissions.IsAuthenticated',
     ],
 }
 
@@ -137,9 +146,11 @@ STATIC_URL = 'static/'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-# CORS configuration
-CORS_ALLOW_ALL_ORIGINS = True
-CORS_ALLOW_CREDENTIALS = True
+# CORS: open in development (phone on the LAN, Capacitor app); explicit list otherwise.
+# Auth uses a token header, not cookies, so credentials are not needed cross-origin.
+_cors_origins = [o.strip() for o in os.environ.get('DJANGO_CORS_ORIGINS', '').split(',') if o.strip()]
+CORS_ALLOW_ALL_ORIGINS = DEBUG and not _cors_origins
+CORS_ALLOWED_ORIGINS = _cors_origins
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 

@@ -16,6 +16,7 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
   });
 
   const [errors, setErrors] = useState({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!isOpen) return null;
 
@@ -27,8 +28,9 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isSubmitting) return;
     const newErrors = {};
     if (!formData.name.trim()) newErrors.name = "Full name is required";
     if (!formData.age) newErrors.age = "Age is required";
@@ -38,8 +40,17 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
       return;
     }
 
-    onCreatePatient(formData);
-    onClose();
+    // Only close once the patient really exists; otherwise keep the form and show why
+    setIsSubmitting(true);
+    try {
+      await onCreatePatient(formData);
+      setErrors({});
+      onClose();
+    } catch (err) {
+      setErrors({ form: err?.message || "Could not register the patient. Please try again." });
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const commonLocations = [
@@ -302,6 +313,15 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
             </div>
           </div>
 
+          {errors.form && (
+            <div
+              role="alert"
+              style={{ background: "#FEF2F2", border: "1px solid #FECDD3", color: "#991B1B", borderRadius: "10px", padding: "9px 12px", fontSize: "0.8rem", fontWeight: 600 }}
+            >
+              {errors.form}
+            </div>
+          )}
+
           {/* Bottom Actions */}
           <div style={{ display: "flex", gap: "10px", marginTop: "8px" }}>
             <button
@@ -315,10 +335,11 @@ export const NewPatientModal = ({ isOpen, onClose, onCreatePatient }) => {
             <button
               type="submit"
               className="btn-primary"
-              style={{ flex: 1.5, padding: "12px" }}
+              disabled={isSubmitting}
+              style={{ flex: 1.5, padding: "12px", opacity: isSubmitting ? 0.6 : 1 }}
             >
               <UserPlus size={18} />
-              <span>Save & Open Profile</span>
+              <span>{isSubmitting ? "Saving…" : "Save & Open Profile"}</span>
             </button>
           </div>
         </form>

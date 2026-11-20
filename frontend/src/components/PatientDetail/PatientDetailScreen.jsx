@@ -21,6 +21,7 @@ import { CircularGauge } from "../Common/CircularGauge";
 import { SeverityTrendChart } from "../Common/SeverityTrendChart";
 import { api, extractTissueStats } from "../../services/api";
 import { getWoundLabel } from "../../services/woundLabel";
+import { resolveMediaUrl } from "../../services/apiConfig";
 
 export const PatientDetailScreen = ({
   patient,
@@ -912,7 +913,7 @@ export const PatientDetailScreen = ({
                       >
                         {day1Scan.image || day1Scan.image_base64 ? (
                           <img
-                            src={day1Scan.image || day1Scan.image_base64}
+                            src={resolveMediaUrl(day1Scan.image || day1Scan.image_base64)}
                             alt="Day 1 Scan"
                             style={{ width: "100%", height: "100%", objectFit: "cover" }}
                           />
@@ -966,7 +967,7 @@ export const PatientDetailScreen = ({
                       >
                         {latestScan.image || latestScan.image_base64 ? (
                           <img
-                            src={latestScan.image || latestScan.image_base64}
+                            src={resolveMediaUrl(latestScan.image || latestScan.image_base64)}
                             alt="Latest Scan"
                             style={{ width: "100%", height: "100%", objectFit: "cover" }}
                           />
@@ -1041,7 +1042,7 @@ export const PatientDetailScreen = ({
                     >
                       {activeScan.image || activeScan.image_base64 ? (
                         <img
-                          src={activeScan.image || activeScan.image_base64}
+                          src={resolveMediaUrl(activeScan.image || activeScan.image_base64)}
                           alt="Historical Wound Scan"
                           style={{ width: "100%", height: "100%", objectFit: "cover" }}
                         />
@@ -1083,7 +1084,7 @@ export const PatientDetailScreen = ({
                   {/* Tissue Breakdown Bars for this Historical Scan */}
                   <div style={{ background: "#FFFFFF", padding: "10px 12px", borderRadius: "12px", border: "1px solid #E2E8F0" }}>
                     <span style={{ fontSize: "0.7rem", fontWeight: "800", color: "#64748B", textTransform: "uppercase", display: "block", marginBottom: "6px" }}>
-                      Tissue Segmentation (FPN+VGG16)
+                      Tissue breakdown (colour analysis)
                     </span>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px", fontSize: "0.74rem", textAlign: "center" }}>
                       <div style={{ background: "#F0FDF4", padding: "6px", borderRadius: "8px", border: "1px solid #BBF7D0", color: "#166534" }}>

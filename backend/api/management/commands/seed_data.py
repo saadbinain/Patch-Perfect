@@ -1,10 +1,20 @@
-from django.core.management.base import BaseCommand
+from django.contrib.auth import get_user_model
+from django.core.management.base import BaseCommand, CommandError
 from api.models import Patient, WoundProfile, WoundAssessmentScan, TreatmentGuideline
 
 class Command(BaseCommand):
     help = 'Seeds initial manuscript patient profiles and treatment guidelines into the database'
 
+    def add_arguments(self, parser):
+        parser.add_argument('--owner', help='Username whose registry receives the demo patients (required for patients).')
+
     def handle(self, *args, **kwargs):
+        owner = None
+        if kwargs.get('owner'):
+            try:
+                owner = get_user_model().objects.get(username=kwargs['owner'])
+            except get_user_model().DoesNotExist:
+                raise CommandError(f"No user named {kwargs['owner']}")
         self.stdout.write("Seeding Treatment Guidelines...")
         guidelines_data = [
             {
@@ -318,7 +328,12 @@ class Command(BaseCommand):
             healing_status = p_data.pop("healing_status")
             ai_recommendation = p_data.pop("ai_recommendation")
 
+            if owner is None:
+                self.stdout.write(self.style.WARNING("Skipping demo patients: pass --owner <username> to seed them."))
+                break
+
             patient, _ = Patient.objects.update_or_create(
+                owner=owner,
                 custom_id=p_data["custom_id"],
                 defaults=p_data
             )
@@ -329,7 +344,7 @@ class Command(BaseCommand):
 
             wp = WoundProfile.objects.create(
                 patient=patient,
-                label=f"{anatomical_location} {wound_type}".strip(),
+                label=anatomical_location,
                 wound_type=wound_type,
                 anatomical_location=anatomical_location,
                 status=status_val,
