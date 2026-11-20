@@ -1,6 +1,6 @@
 const TOKEN_KEY = "patch_perfect_auth_token";
 const USER_KEY = "patch_perfect_auth_user";
-const BACKEND_BASE_URL = "/api";
+const BACKEND_BASE_URL = import.meta.env.VITE_API_URL || "/api";
 
 export const authService = {
   // Get stored token

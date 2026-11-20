@@ -3,7 +3,7 @@ import { treatmentGuidelines } from "../data/mockGuidelines";
 import { simulateAIAnalysis } from "../data/mockAI";
 import { authService } from "./authService";
 
-const BACKEND_BASE_URL = "/api";
+const BACKEND_BASE_URL = import.meta.env.VITE_API_URL || "/api";
 const STORAGE_KEY_PATIENTS = "patch_perfect_patients_v1";
 
 const getAuthHeaders = () => {

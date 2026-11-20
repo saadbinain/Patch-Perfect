@@ -456,52 +456,44 @@ class AIPipelineManager:
                 classification_data["mismatch_note"] = f"Different wound type detected: image appears to be {predicted_type} instead of registered {expected_type}."
 
         # -------------------------------------------------------------
-        # Stage 4: Tissue Breakdown & Severity Scoring (1 to 5)
+        # Stage 4: Tissue Breakdown & Severity Scoring (via severity_analyzer model)
         # -------------------------------------------------------------
-        if patient and hasattr(patient, 'wound_profile') and patient.wound_profile.current_severity:
-            base_sev = patient.wound_profile.current_severity
-            severity_score = max(1, min(5, base_sev + (random.choice([-1, 0, 1]) if random.random() > 0.6 else 0)))
-        else:
-            # Calibrated baseline from classification confidence and area
-            severity_score = 3 if area_mm2 < 450 else 4
+        from .severity_analyzer import analyze_tissue_and_severity, evaluate_healing_status
 
-        severity_labels = {
-            1: "Mild",
-            2: "Mild-Moderate",
-            3: "Moderate",
-            4: "Very Severe",
-            5: "Critical",
-        }
+        # Run model analysis on cropped wound image or full PIL image
+        target_tissue_img = cropped_pil if cropped_pil is not None else pil_img
+        sev_analysis = analyze_tissue_and_severity(target_tissue_img)
 
-        healing_status = "Improving" if severity_score <= 2 else "Stable" if severity_score == 3 else "Deteriorating"
+        severity_score = sev_analysis["severity_score"]
+        severity_level = sev_analysis["severity_level"]
+        granulation = sev_analysis["granulation_pct"]
+        slough = sev_analysis["slough_pct"]
+        necrotic = sev_analysis["necrosis_pct"]
+        recommendation = sev_analysis["recommendation"]
 
-        if severity_score <= 2:
-            granulation = round(random.uniform(72.0, 86.0), 1)
-            slough = round(random.uniform(10.0, 20.0), 1)
-            necrotic = round(100.0 - granulation - slough, 1)
-        elif severity_score == 3:
-            granulation = round(random.uniform(46.0, 56.0), 1)
-            slough = round(random.uniform(30.0, 38.0), 1)
-            necrotic = round(100.0 - granulation - slough, 1)
-        else:
-            granulation = round(random.uniform(20.0, 32.0), 1)
-            slough = round(random.uniform(46.0, 58.0), 1)
-            necrotic = round(100.0 - granulation - slough, 1)
+        # Longitudinal comparison against baseline if available
+        baseline_pixels = None
+        baseline_sev = None
+        if wound_profile and hasattr(wound_profile, 'scans'):
+            first_scan = wound_profile.scans.order_by('scan_date').first()
+            if first_scan:
+                baseline_pixels = getattr(first_scan, 'boundary_area_mm2', None)
+                baseline_sev = getattr(first_scan, 'severity_score', None)
 
-        recommendations = {
-            1: "Favorable re-epithelialization observed. Continue protective dressing and weekly check-up.",
-            2: "Healthy pink granulation tissue present. Clean gently with sterile 0.9% saline and apply non-adherent dressing.",
-            3: "Daily monitoring advised. Clean wound periphery with sterile saline solution. Schedule follow-up within 48 hours.",
-            4: "Elevated slough and periwound maceration detected. Prompt sharp debridement and pressure offloading recommended.",
-            5: "Critical tissue necrosis and spreading erythema. Urgent surgical consult and systemic antibiotic review required.",
-        }
+        current_px = sev_analysis["wound_pixels"] or int(area_mm2)
+        healing_status = evaluate_healing_status(
+            current_pixels=current_px,
+            baseline_pixels=baseline_pixels,
+            current_severity_score=severity_score,
+            baseline_severity_score=baseline_sev
+        )
 
         return {
             "severity_score": severity_score,
-            "severity_level": severity_labels.get(severity_score, "Moderate"),
+            "severity_level": severity_level,
             "wound_type": predicted_type,
             "healing_status": healing_status,
-            "recommendation": recommendations.get(severity_score, recommendations[3]),
+            "recommendation": recommendation,
             "image_processed": preprocessed["base64"],
             "pipeline_metrics": {
                 "similarity": similarity_data,
@@ -512,8 +504,11 @@ class AIPipelineManager:
                     "slough": slough,
                     "necrotic": necrotic,
                 },
+                "wound_pixels": sev_analysis["wound_pixels"],
+                "raw_severity_level": sev_analysis.get("raw_severity_level", "MODERATE"),
             },
         }
+
 
 
 # Singleton pipeline instance
