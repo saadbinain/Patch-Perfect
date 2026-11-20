@@ -36,6 +36,21 @@ const saveStoredPatients = (patients) => {
 
 import { formatDisplayDate, getEffectiveDate } from "./dateService";
 
+// Normalise tissue percentages from any result shape (backend metrics, mock pipeline, legacy)
+export const extractTissueStats = (scanResult) => {
+  const pr = scanResult?.pipelineResults || {};
+  const ta = pr.tissueAnalysis || {};
+  const src = scanResult?.tissueStats || scanResult?.tissue_stats || {};
+  // older local records stored the whole pipeline object as tissue stats
+  const legacy = src.tissueAnalysis || {};
+  const pick = (...vals) => vals.find((v) => typeof v === "number");
+  return {
+    granulation: pick(src.granulation, legacy.granulationPercent, ta.granulationPercent, pr.granulation) ?? 50,
+    slough: pick(src.slough, legacy.sloughPercent, ta.sloughPercent, pr.slough) ?? 35,
+    necrotic: pick(src.necrotic, legacy.necroticPercent, ta.necroticPercent, pr.necrotic) ?? 15,
+  };
+};
+
 export const api = {
   // Get all patient wound profiles
   getPatients: async () => {
@@ -80,7 +95,7 @@ export const api = {
     const woundType = patientData.woundType || "Pending AI Scan";
     const initialWound = {
       id: Date.now(),
-      label: patientData.label || patientData.woundLabel || `${anatomicalLocation} ${woundType}`.trim(),
+      label: patientData.label || patientData.woundLabel || anatomicalLocation,
       wound_type: woundType,
       anatomical_location: anatomicalLocation,
       status: "AWAITING SCAN",
@@ -244,7 +259,7 @@ export const api = {
           location: scanResult.location || "Lower Extremity",
           recommendation: scanResult.recommendation,
           image_base64: imagePreview,
-          tissue_stats: scanResult.pipelineResults || { granulation: 50, slough: 35, necrotic: 15 },
+          tissue_stats: extractTissueStats(scanResult),
           scan_date: scanDateObj.toISOString(),
           scan_date_formatted: formattedDate,
         }),
@@ -266,6 +281,8 @@ export const api = {
     const newScanEntry = {
       id: scanResult.id,
       date: formattedDate,
+      // ISO timestamp so timelines can sort scans chronologically
+      scan_date: scanDateObj.toISOString(),
       scan_date_formatted: formattedDate,
       severityScore: scanResult.severityScore,
       severity_score: scanResult.severityScore,
@@ -278,10 +295,10 @@ export const api = {
       location: scanResult.location || patient.anatomicalLocation,
       anatomical_location: scanResult.location || patient.anatomicalLocation,
       recommendation: scanResult.recommendation,
-      tissueStats: scanResult.pipelineResults || { granulation: 50, slough: 35, necrotic: 15 },
-      granulation_percent: scanResult.pipelineResults?.granulation ?? 50,
-      slough_percent: scanResult.pipelineResults?.slough ?? 35,
-      necrotic_percent: scanResult.pipelineResults?.necrotic ?? 15,
+      tissueStats: extractTissueStats(scanResult),
+      granulation_percent: extractTissueStats(scanResult).granulation,
+      slough_percent: extractTissueStats(scanResult).slough,
+      necrotic_percent: extractTissueStats(scanResult).necrotic,
       image: imagePreview,
       image_base64: imagePreview,
       isLatest: true,

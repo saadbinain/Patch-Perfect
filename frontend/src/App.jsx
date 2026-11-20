@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { TopHeader } from "./components/Navigation/TopHeader";
 import { BottomNav } from "./components/Navigation/BottomNav";
 import { WoundProfilesDashboard } from "./components/Dashboard/WoundProfilesDashboard";
@@ -36,6 +36,27 @@ export function App() {
   const [isNewPatientModalOpen, setIsNewPatientModalOpen] = useState(false);
   const [scanningPatient, setScanningPatient] = useState(null);
   const [scanningWound, setScanningWound] = useState(null);
+  // Where to return when a scan started from a patient/wound screen is cancelled
+  const [scanReturnTarget, setScanReturnTarget] = useState(null);
+  // Unsaved photo/result in the scan wizard -> confirm before navigating away
+  const [scanIsDirty, setScanIsDirty] = useState(false);
+  const [pendingLeave, setPendingLeave] = useState(null);
+  const guardScanLeave = (action) => {
+    if (activeTab === "scan" && scanIsDirty) {
+      setPendingLeave(() => action);
+    } else {
+      action();
+    }
+  };
+
+  // Each screen change should start at the top, not inherit the previous scroll position
+  const mainScrollRef = useRef(null);
+  const selectedPatientKey = selectedPatientForTrend
+    ? selectedPatientForTrend.id || selectedPatientForTrend.custom_id
+    : null;
+  useEffect(() => {
+    if (mainScrollRef.current) mainScrollRef.current.scrollTop = 0;
+  }, [activeTab, selectedPatientKey, viewingWoundId]);
 
   // Listen for auth state changes
   useEffect(() => {
@@ -116,12 +137,19 @@ export function App() {
   const handleCreatePatient = async (newPatientData) => {
     const created = await api.createPatient(newPatientData);
     await loadPatients();
+    if (activeTab === "scan") {
+      // Registered from inside the scan flow: keep scanning, with this patient selected
+      setScanningPatient(created);
+      setScanningWound(null);
+      return;
+    }
     setSelectedPatientForTrend(created);
     setViewingWoundId(null);
   };
 
   // Handle Scan Start from Patient Profile
   const handleStartScanForPatient = (patient, wound = null) => {
+    setScanReturnTarget({ patient, woundId: viewingWoundId });
     setScanningPatient(patient);
     setScanningWound(wound);
     setSelectedPatientForTrend(null);
@@ -131,16 +159,34 @@ export function App() {
 
   // Handle AI Scan Save with Custom/Simulated Date & Target Wound
   const handleSaveScanResult = async (patientId, scanResult, imagePreview, customDate, woundProfileId = null) => {
+    let found = null;
     if (patientId) {
       await api.saveScanResult(patientId, scanResult, imagePreview, customDate, woundProfileId);
       const updatedList = await loadPatients();
-      if (selectedPatientForTrend) {
-        const found = updatedList.find((p) => (p.id || p.custom_id) === patientId);
-        if (found) setSelectedPatientForTrend(found);
-      }
+      found = updatedList.find((p) => (p.id || p.custom_id) === patientId) || null;
     }
     setScanningPatient(null);
     setScanningWound(null);
+    setScanReturnTarget(null);
+    setScanIsDirty(false);
+    // Land on the wound timeline that was just scanned so the new result is visible
+    if (found) {
+      const hasWound = woundProfileId != null && (found.wounds || []).some((w) => w.id === woundProfileId);
+      setSelectedPatientForTrend(found);
+      setViewingWoundId(hasWound ? woundProfileId : found.wounds?.[0]?.id ?? "primary");
+    }
+    setActiveTab("wounds");
+  };
+
+  const handleCancelScan = () => {
+    setScanIsDirty(false);
+    setScanningPatient(null);
+    setScanningWound(null);
+    if (scanReturnTarget?.patient) {
+      setSelectedPatientForTrend(scanReturnTarget.patient);
+      setViewingWoundId(scanReturnTarget.woundId ?? null);
+    }
+    setScanReturnTarget(null);
     setActiveTab("wounds");
   };
 
@@ -208,11 +254,7 @@ export function App() {
           title="AI Analysis"
           isSubscreen={true}
           currentUser={currentUser}
-          onBack={() => {
-            setScanningPatient(null);
-            setScanningWound(null);
-            setActiveTab("wounds");
-          }}
+          onBack={() => guardScanLeave(handleCancelScan)}
         />
       ) : activeTab === "guidelines" ? (
         <TopHeader
@@ -313,7 +355,7 @@ export function App() {
       )}
 
       {/* Main Content Body */}
-      <main className="screen-scrollable-content">
+      <main className="screen-scrollable-content" ref={mainScrollRef}>
         {activeTab === "wounds" && (
           selectedPatientForTrend ? (
             <PatientDetailScreen
@@ -351,16 +393,14 @@ export function App() {
 
         {activeTab === "scan" && (
           <AIAnalysisWizard
+            key={scanningPatient ? scanningPatient.id || scanningPatient.custom_id : "new-scan"}
             patients={patients}
             initialPatient={scanningPatient}
             initialWound={scanningWound}
             onOpenNewPatient={() => setIsNewPatientModalOpen(true)}
+            onRefreshPatients={loadPatients}
             onSaveAndReturn={handleSaveScanResult}
-            onCancel={() => {
-              setScanningPatient(null);
-              setScanningWound(null);
-              setActiveTab("wounds");
-            }}
+            onDirtyChange={setScanIsDirty}
           />
         )}
 
@@ -371,18 +411,67 @@ export function App() {
       <BottomNav
         activeTab={activeTab}
         actionNeededCount={actionNeededCount}
-        onTabChange={(tab) => {
+        onTabChange={(tab) => guardScanLeave(() => {
+          if (tab === activeTab && tab === "scan") return;
+          // Scanning from a patient/wound screen: carry that context into the wizard
+          if (tab === "scan" && activeTab === "wounds" && selectedPatientForTrend) {
+            const wound = viewingWoundId
+              ? (selectedPatientForTrend.wounds || []).find((w) => w.id === viewingWoundId) || null
+              : null;
+            handleStartScanForPatient(selectedPatientForTrend, wound);
+            return;
+          }
           if (tab !== "scan") {
+            setScanIsDirty(false);
             setScanningPatient(null);
             setScanningWound(null);
+            setScanReturnTarget(null);
           }
           if (tab !== "wounds") {
             setSelectedPatientForTrend(null);
             setViewingWoundId(null);
           }
           setActiveTab(tab);
-        }}
+        })}
       />
+
+      {/* Confirm leaving the scan flow with an unsaved photo/result */}
+      {pendingLeave && (
+        <div className="modal-backdrop" onClick={() => setPendingLeave(null)}>
+          <div
+            className="bottom-sheet-content"
+            role="alertdialog"
+            aria-labelledby="discard-scan-title"
+            onClick={(e) => e.stopPropagation()}
+            style={{ gap: "10px" }}
+          >
+            <div className="sheet-handle-bar" />
+            <h3 id="discard-scan-title" style={{ fontSize: "1.1rem", fontWeight: 800, color: "#0F172A" }}>
+              Discard this scan?
+            </h3>
+            <p style={{ fontSize: "0.86rem", color: "#64748B", lineHeight: 1.45 }}>
+              The photo and analysis haven't been saved to the patient's timeline yet.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginTop: "8px" }}>
+              <button type="button" className="btn-secondary" onClick={() => setPendingLeave(null)}>
+                Keep scanning
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => {
+                  const action = pendingLeave;
+                  setPendingLeave(null);
+                  setScanIsDirty(false);
+                  action();
+                }}
+              >
+                Discard
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* New Patient Modal Bottom Sheet */}
       <NewPatientModal

@@ -89,6 +89,17 @@ body {
   align-items: center;
 }
 
+/* #root must span the viewport; otherwise it sizes to its widest child
+   (e.g. horizontally scrolling chip rows) and body's centering clips both sides. */
+#root {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-width: 0;
+}
+
 h1, h2, h3, h4, h5, h6, .font-heading {
   font-family: 'Outfit', sans-serif;
   letter-spacing: -0.02em;

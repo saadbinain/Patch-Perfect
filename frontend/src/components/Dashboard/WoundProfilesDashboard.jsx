@@ -210,7 +210,7 @@ export const WoundProfilesDashboard = ({
   }
 
   return (
-    <div style={{ padding: "16px 14px 24px 14px", display: "flex", flexDirection: "column", gap: "16px" }}>
+    <div style={{ padding: "16px 14px 72px 14px", display: "flex", flexDirection: "column", gap: "16px" }}>
       {/* KPI METRICS HORIZONTAL CAROUSEL */}
       <div
         style={{
@@ -224,7 +224,7 @@ export const WoundProfilesDashboard = ({
       >
         {/* Total Patients Card */}
         <div
-          onClick={() => setActiveFilter("all")}
+          onClick={() => { setActiveFilter("all"); setCurrentPage(1); }}
           style={{
             flex: "0 0 110px",
             background: activeFilter === "all" ? "linear-gradient(135deg, #1E293B 0%, #0F172A 100%)" : "#FFFFFF",
@@ -250,7 +250,7 @@ export const WoundProfilesDashboard = ({
 
         {/* Action Needed Card */}
         <div
-          onClick={() => setActiveFilter("danger")}
+          onClick={() => { setActiveFilter("danger"); setCurrentPage(1); }}
           style={{
             flex: "0 0 120px",
             background: activeFilter === "danger" ? "linear-gradient(135deg, #991B1B 0%, #7F1D1D 100%)" : "#FEF2F2",
@@ -276,7 +276,7 @@ export const WoundProfilesDashboard = ({
 
         {/* Improving Card */}
         <div
-          onClick={() => setActiveFilter("improving")}
+          onClick={() => { setActiveFilter("improving"); setCurrentPage(1); }}
           style={{
             flex: "0 0 115px",
             background: activeFilter === "improving" ? "linear-gradient(135deg, #065F46 0%, #047857 100%)" : "#ECFDF5",
@@ -302,7 +302,7 @@ export const WoundProfilesDashboard = ({
 
         {/* Stable Card */}
         <div
-          onClick={() => setActiveFilter("stable")}
+          onClick={() => { setActiveFilter("stable"); setCurrentPage(1); }}
           style={{
             flex: "0 0 110px",
             background: activeFilter === "stable" ? "linear-gradient(135deg, #0F766E 0%, #115E59 100%)" : "#F0FDFA",

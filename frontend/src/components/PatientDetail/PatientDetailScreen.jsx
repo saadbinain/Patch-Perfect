@@ -19,7 +19,8 @@ import {
 } from "lucide-react";
 import { CircularGauge } from "../Common/CircularGauge";
 import { SeverityTrendChart } from "../Common/SeverityTrendChart";
-import { api } from "../../services/api";
+import { api, extractTissueStats } from "../../services/api";
+import { getWoundLabel } from "../../services/woundLabel";
 
 export const PatientDetailScreen = ({
   patient,
@@ -29,7 +30,8 @@ export const PatientDetailScreen = ({
   onStartScanForPatient,
   onPatientUpdated,
 }) => {
-  const [selectedScanIdx, setSelectedScanIdx] = useState(0);
+  const LATEST_SCAN = Number.MAX_SAFE_INTEGER;
+  const [selectedScanIdx, setSelectedScanIdx] = useState(LATEST_SCAN);
   const [isCompareMode, setIsCompareMode] = useState(false);
   const [isAddingWound, setIsAddingWound] = useState(false);
   const [isSavingWound, setIsSavingWound] = useState(false);
@@ -49,7 +51,7 @@ export const PatientDetailScreen = ({
           {
             id: "primary",
             label: patient.anatomicalLocation
-              ? `${patient.anatomicalLocation} (${patient.woundType || "Primary"})`
+              ? patient.anatomicalLocation
               : patient.woundType || "Primary Wound",
             wound_type: patient.woundType || "Diabetic Wound",
             anatomical_location: patient.anatomicalLocation || "Lower Extremity",
@@ -77,8 +79,13 @@ export const PatientDetailScreen = ({
       : [];
 
   const chronologicalScans = [...rawScans].sort((a, b) => {
-    const timeA = a.scan_date ? new Date(a.scan_date).getTime() : 0;
-    const timeB = b.scan_date ? new Date(b.scan_date).getTime() : 0;
+    // older local scans only have a formatted `date` string; fall back to parsing it
+    const toTime = (scan) => {
+      const t = new Date(scan.scan_date || scan.date || 0).getTime();
+      return Number.isNaN(t) ? 0 : t;
+    };
+    const timeA = toTime(a);
+    const timeB = toTime(b);
     return timeA - timeB;
   });
 
@@ -93,8 +100,7 @@ export const PatientDetailScreen = ({
   // Helper for tissue stats
   const getTissueStats = (scan) => {
     if (!scan) return { granulation: 50, slough: 35, necrotic: 15 };
-    if (scan.tissueStats) return scan.tissueStats;
-    if (scan.tissue_stats) return scan.tissue_stats;
+    if (scan.tissueStats || scan.tissue_stats) return extractTissueStats(scan);
     return {
       granulation: scan.granulation_percent ?? 50,
       slough: scan.slough_percent ?? 35,
@@ -231,6 +237,18 @@ export const PatientDetailScreen = ({
                   </span>
                 </div>
               </div>
+
+              {onStartScanForPatient && (
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => onStartScanForPatient(patient, wounds.length === 1 && wounds[0].id !== "primary" ? wounds[0] : null)}
+                  style={{ padding: "9px 12px", fontSize: "0.8rem", borderRadius: "12px", flexShrink: 0 }}
+                >
+                  <Camera size={16} />
+                  <span>Scan</span>
+                </button>
+              )}
             </div>
 
             {/* Demographics Details Grid */}
@@ -514,7 +532,7 @@ export const PatientDetailScreen = ({
                   key={w.id || index}
                   onClick={() => {
                     setViewingWoundId(w.id || "primary");
-                    setSelectedScanIdx(0);
+                    setSelectedScanIdx(LATEST_SCAN);
                     setIsCompareMode(false);
                   }}
                   style={{
@@ -683,7 +701,7 @@ export const PatientDetailScreen = ({
                 margin: "4px 0 0 0",
               }}
             >
-              {activeWound.anatomical_location || activeWound.label || "Wound Site"}
+              {getWoundLabel(activeWound)}
             </h2>
 
             <div style={{ display: "flex", alignItems: "center", gap: "8px", marginTop: "6px" }}>
@@ -703,6 +721,18 @@ export const PatientDetailScreen = ({
                 {activeWound.status || "AWAITING SCAN"}
               </span>
             </div>
+
+            {onStartScanForPatient && (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => onStartScanForPatient(patient, activeWound.id === "primary" ? null : activeWound)}
+                style={{ width: "100%", marginTop: "12px", padding: "11px", fontSize: "0.86rem" }}
+              >
+                <Camera size={17} />
+                <span>{totalScans > 0 ? "Log follow-up scan" : "Take first scan"}</span>
+              </button>
+            )}
           </div>
 
           {/* BACKTRACKING & TIME-TRAVEL CONTROLS CARD */}
@@ -765,7 +795,7 @@ export const PatientDetailScreen = ({
               >
                 <button
                   disabled={safeIdx === 0}
-                  onClick={() => setSelectedScanIdx((prev) => Math.max(0, prev - 1))}
+                  onClick={() => setSelectedScanIdx(Math.max(0, safeIdx - 1))}
                   style={{
                     background: safeIdx === 0 ? "#F1F5F9" : "#FEE2E2",
                     color: safeIdx === 0 ? "#94A3B8" : "#8B1E1E",
@@ -796,7 +826,7 @@ export const PatientDetailScreen = ({
 
                 <button
                   disabled={safeIdx === totalScans - 1}
-                  onClick={() => setSelectedScanIdx((prev) => Math.min(totalScans - 1, prev + 1))}
+                  onClick={() => setSelectedScanIdx(Math.min(totalScans - 1, safeIdx + 1))}
                   style={{
                     background: safeIdx === totalScans - 1 ? "#F1F5F9" : "#FEE2E2",
                     color: safeIdx === totalScans - 1 ? "#94A3B8" : "#8B1E1E",
@@ -1104,7 +1134,7 @@ export const PatientDetailScreen = ({
             <CircularGauge
               score={activeWound.current_severity ?? activeWound.currentSeverity ?? patient.currentSeverity ?? null}
               label={activeWound.current_severity_label || activeWound.currentSeverityLabel || patient.currentSeverityLabel || "Awaiting Scan"}
-              subtitle={`SEVERITY: ${activeWound.label || activeWound.anatomical_location || "WOUND"}`}
+              subtitle={`SEVERITY: ${getWoundLabel(activeWound, "WOUND")}`}
               size={130}
             />
           </div>
@@ -1127,7 +1157,7 @@ export const PatientDetailScreen = ({
                 </h4>
               </div>
               <span style={{ fontSize: "0.74rem", color: "#64748B", fontWeight: "600" }}>
-                {activeWound.label || "Selected Wound Site"}
+                {getWoundLabel(activeWound, "Selected Wound Site")}
               </span>
             </div>
             <SeverityTrendChart data={activeWound.trend_data || activeWound.trendData || (wounds.length === 1 ? (patient.trendData || patient.trend_data || []) : [])} />
@@ -1146,7 +1176,7 @@ export const PatientDetailScreen = ({
             <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "12px" }}>
               <Layers size={18} color="#8B1E1E" />
               <h4 style={{ fontSize: "0.98rem", fontWeight: "800", color: "#1E293B", margin: 0 }}>
-                {activeWound.label || "Wound"} Scan Archive ({totalScans})
+                {getWoundLabel(activeWound, "Wound")} Scan Archive ({totalScans})
               </h4>
             </div>
 
@@ -1224,7 +1254,7 @@ export const PatientDetailScreen = ({
               }}
             >
               <Camera size={20} />
-              <span>Scan Image for {activeWound.label || activeWound.anatomical_location || "Wound"}</span>
+              <span>Scan {getWoundLabel(activeWound, "Wound")}</span>
               <ArrowRight size={20} />
             </button>
           </div>

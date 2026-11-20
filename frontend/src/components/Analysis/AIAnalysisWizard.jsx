@@ -6,113 +6,208 @@ import {
   RefreshCw,
   UserCheck,
   Calendar,
-  FastForward,
   MapPin,
   Plus,
   AlertTriangle,
+  ArrowLeft,
+  ArrowRight,
+  Save,
+  Circle,
 } from "lucide-react";
 import { CircularGauge } from "../Common/CircularGauge";
 import { api } from "../../services/api";
+import { getWoundLabel } from "../../services/woundLabel";
 import {
   getEffectiveDate,
+  getSimulatedDateConfig,
   formatDisplayDate,
   formatDateInput,
   formatTimeInput,
 } from "../../services/dateService";
-import confetti from "canvas-confetti";
+
+const STEPS = [
+  { id: 1, label: "Patient" },
+  { id: 2, label: "Photo" },
+  { id: 3, label: "Result" },
+];
+
+// Plain-language pipeline stages shown to clinicians while the scan runs
+const ANALYSIS_STAGES = [
+  "Checking the photo matches this wound",
+  "Finding the wound boundary",
+  "Identifying the wound type",
+  "Scoring tissue and severity",
+];
+
+const getPatientId = (p) => (p ? p.id || p.custom_id : null);
+
+const getSimilarity = (result) =>
+  result?.pipelineResults?.similarityCheck || result?.similarityCheck || {};
+
+const isSimilarityMismatch = (sim) =>
+  sim.isSameWound === false ||
+  sim.is_same_wound === false ||
+  (sim.similarityScore !== undefined && sim.similarityScore < 0.65) ||
+  (sim.similarity_score !== undefined && sim.similarity_score < 0.65);
+
+// Colour result tiles by what they actually say, not a fixed colour per tile
+const toneFor = (kind, value, score) => {
+  const tones = {
+    danger: { bg: "#FEF2F2", border: "#FECDD3", label: "#991B1B", text: "#7F1D1D" },
+    warning: { bg: "#FFFBEB", border: "#FDE68A", label: "#92400E", text: "#78350F" },
+    success: { bg: "#F0FDF4", border: "#BBF7D0", label: "#166534", text: "#14532D" },
+    neutral: { bg: "#F8FAFC", border: "#E2E8F0", label: "#475569", text: "#0F172A" },
+  };
+  if (kind === "severity") {
+    if (score == null) return tones.neutral;
+    if (score >= 4) return tones.danger;
+    if (score >= 3) return tones.warning;
+    return tones.success;
+  }
+  if (kind === "healing") {
+    const v = String(value || "").toLowerCase();
+    if (/deteriorat|worse|declin/.test(v)) return tones.danger;
+    if (/improv|heal/.test(v)) return tones.success;
+    if (/stable/.test(v)) return tones.neutral;
+    return tones.warning;
+  }
+  return tones.neutral;
+};
+
+const smallButton = {
+  background: "#FFFFFF",
+  border: "1px solid #CBD5E1",
+  borderRadius: "8px",
+  padding: "6px 10px",
+  fontSize: "0.74rem",
+  fontWeight: "700",
+  color: "#334155",
+  cursor: "pointer",
+};
+
+const sectionLabel = {
+  fontSize: "0.72rem",
+  fontWeight: "800",
+  letterSpacing: "0.05em",
+  color: "#8B1E1E",
+  textTransform: "uppercase",
+  display: "block",
+  marginBottom: "8px",
+};
 
 export const AIAnalysisWizard = ({
   patients = [],
   initialPatient = null,
   initialWound = null,
   onOpenNewPatient,
+  onRefreshPatients,
   onSaveAndReturn,
-  onCancel,
+  onDirtyChange,
 }) => {
-  const [selectedPatientId, setSelectedPatientId] = useState(initialPatient?.id || initialPatient?.custom_id || "");
-  const [selectedWoundId, setSelectedWoundId] = useState(initialWound?.id || null);
-  const [patientSearch, setPatientSearch] = useState(initialPatient?.name || "");
+  const [selectedPatientId, setSelectedPatientId] = useState(getPatientId(initialPatient) || "");
+  const [selectedWoundId, setSelectedWoundId] = useState(initialWound?.id ?? null);
+  const [patientSearch, setPatientSearch] = useState("");
   const [showPatientDropdown, setShowPatientDropdown] = useState(false);
 
-  // Inline wound creation state in wizard
-  const [isAddingWoundInWizard, setIsAddingWoundInWizard] = useState(false);
-  const [wizardNewWound, setWizardNewWound] = useState({
-    anatomicalLocation: "",
-    woundType: "Pending AI Scan",
-    label: "",
-  });
-  const [isSavingWoundInWizard, setIsSavingWoundInWizard] = useState(false);
+  // Inline wound creation
+  const [isAddingWound, setIsAddingWound] = useState(false);
+  const [newWoundLocation, setNewWoundLocation] = useState("");
+  const [isSavingWound, setIsSavingWound] = useState(false);
 
-  const [currentStep, setCurrentStep] = useState(initialPatient ? 2 : 1);
+  // Skip straight to the photo only when patient AND wound are unambiguous
+  const woundIsKnown = Boolean(initialWound) || (initialPatient?.wounds?.length ?? 0) <= 1;
+  const [currentStep, setCurrentStep] = useState(initialPatient && woundIsKnown ? 2 : 1);
   const [imagePreview, setImagePreview] = useState(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [analysisStage, setAnalysisStage] = useState("");
+  const [stageIndex, setStageIndex] = useState(-1);
   const [analysisResult, setAnalysisResult] = useState(null);
+  const [mismatchAcknowledged, setMismatchAcknowledged] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
-  // Scan Assessment Date State
+  // Assessment date (defaults to now; shift shortcuts only in date-simulation/demo mode)
   const [scanDate, setScanDate] = useState(getEffectiveDate());
   const [showDateCustomizer, setShowDateCustomizer] = useState(false);
+  const isSimulationMode = Boolean(getSimulatedDateConfig()?.enabled);
 
   const fileInputRef = useRef(null);
 
-  // Selected patient object
-  const selectedPatient = patients.find((p) => (p.id || p.custom_id) === selectedPatientId) || initialPatient;
+  const selectedPatient =
+    patients.find((p) => getPatientId(p) === selectedPatientId) ||
+    (getPatientId(initialPatient) === selectedPatientId ? initialPatient : null);
+  const patientWounds = selectedPatient?.wounds || [];
+  const selectedWound =
+    patientWounds.find((w) => w.id === selectedWoundId) || patientWounds[0] || null;
 
-  // Sync selected wound if patient changes
+  // Keep a valid wound selected when the patient (or their wound list) changes
   useEffect(() => {
-    if (selectedPatient?.wounds && selectedPatient.wounds.length > 0) {
-      if (!selectedWoundId || !selectedPatient.wounds.some((w) => w.id === selectedWoundId)) {
-        setSelectedWoundId(selectedPatient.wounds[0].id);
-      }
+    if (patientWounds.length > 0 && !patientWounds.some((w) => w.id === selectedWoundId)) {
+      setSelectedWoundId(patientWounds[0].id);
     }
   }, [selectedPatient, selectedWoundId]);
 
-  // Filtered patients for dropdown
+  // Tell the parent when leaving would throw away work
+  useEffect(() => {
+    if (onDirtyChange) onDirtyChange(Boolean(imagePreview || analysisResult));
+  }, [imagePreview, analysisResult]);
+
+  const q = patientSearch.toLowerCase().trim();
   const filteredPatients = patients.filter(
     (p) =>
-      p.name.toLowerCase().includes(patientSearch.toLowerCase()) ||
-      (p.id && String(p.id).toLowerCase().includes(patientSearch.toLowerCase())) ||
-      (p.custom_id && String(p.custom_id).toLowerCase().includes(patientSearch.toLowerCase()))
+      !q ||
+      (p.name || "").toLowerCase().includes(q) ||
+      String(getPatientId(p) || "").toLowerCase().includes(q)
   );
 
   const handlePatientSelect = (patient) => {
-    const pId = patient.id || patient.custom_id;
-    setSelectedPatientId(pId);
-    setPatientSearch(patient.name);
+    setSelectedPatientId(getPatientId(patient));
+    setPatientSearch("");
     setShowPatientDropdown(false);
-    if (patient.wounds && patient.wounds.length > 0) {
-      setSelectedWoundId(patient.wounds[0].id);
-    }
-    setCurrentStep(2);
+    setSelectedWoundId(patient.wounds?.[0]?.id ?? null);
+    setIsAddingWound(false);
   };
 
   const handleImageChange = (e) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        setImagePreview(reader.result);
-      };
-      reader.readAsDataURL(file);
-    }
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setImagePreview(reader.result);
+    reader.readAsDataURL(file);
+    // allow re-selecting the same file after a retake
+    e.target.value = "";
   };
 
-  // Quick Date Shift helpers for this scan
-  const handleShiftDate = (days) => {
+  const handleCreateWound = async () => {
+    const location = newWoundLocation.trim();
+    if (!location || !selectedPatient) return;
+    setIsSavingWound(true);
+    const res = await api.addWoundToPatient(getPatientId(selectedPatient), {
+      anatomicalLocation: location,
+      woundType: "Pending AI Scan",
+      label: location,
+    });
+    // Refresh first so the new wound exists in the list before we select it
+    if (onRefreshPatients) await onRefreshPatients();
+    const latestWound = res?.wounds?.[res.wounds.length - 1];
+    if (latestWound) setSelectedWoundId(latestWound.id);
+    setIsSavingWound(false);
+    setIsAddingWound(false);
+    setNewWoundLocation("");
+  };
+
+  // Date helpers
+  const shiftDate = (days) => {
     const next = new Date(scanDate);
     next.setDate(next.getDate() + days);
     setScanDate(next);
   };
-
-  const handleSetCustomDate = (dateStr) => {
+  const setCustomDate = (dateStr) => {
     if (!dateStr) return;
     const [year, month, day] = dateStr.split("-").map(Number);
     const updated = new Date(scanDate);
     updated.setFullYear(year, month - 1, day);
     setScanDate(updated);
   };
-
-  const handleSetCustomTime = (timeStr) => {
+  const setCustomTime = (timeStr) => {
     if (!timeStr) return;
     const [hours, minutes] = timeStr.split(":").map(Number);
     const updated = new Date(scanDate);
@@ -120,326 +215,246 @@ export const AIAnalysisWizard = ({
     setScanDate(updated);
   };
 
-  const handleResetToCurrentDate = () => {
-    setScanDate(getEffectiveDate());
-  };
-
-  // Run AI Analysis Pipeline
   const handleStartAnalysis = async () => {
-    if (!imagePreview && !selectedPatient) {
-      alert("Please upload or capture a wound photograph first.");
-      return;
-    }
-
+    if (!imagePreview || !selectedPatient) return;
     setIsAnalyzing(true);
+    setAnalysisResult(null);
+    setMismatchAcknowledged(false);
     setCurrentStep(3);
 
-    // Step 1: ResNet50 similarity check
-    setAnalysisStage("Stage 1/4: ResNet50 Patient & Similarity Verification...");
-    await new Promise((r) => setTimeout(r, 450));
-
-    // Step 2: FUSegNet boundary segmentation
-    setAnalysisStage("Stage 2/4: FUSegNet Wound Boundary Localization & Cropping...");
-    await new Promise((r) => setTimeout(r, 550));
-
-    // Step 3: VGG16 classification
-    setAnalysisStage("Stage 3/4: VGG16 Ulcer Type Classification...");
-    await new Promise((r) => setTimeout(r, 450));
-
-    // Step 4: FPN + VGG16 severity assessment
-    setAnalysisStage("Stage 4/4: FPN+VGG16 Tissue Breakdown & Severity Scoring...");
-
-    // Request from API with selected wound context
-    const result = await api.analyzeWound(imagePreview, selectedPatient, selectedWoundId);
-
+    const delays = [450, 550, 450];
+    for (let i = 0; i < delays.length; i++) {
+      setStageIndex(i);
+      await new Promise((r) => setTimeout(r, delays[i]));
+    }
+    setStageIndex(3);
+    const result = await api.analyzeWound(imagePreview, selectedPatient, selectedWound?.id ?? null);
+    setStageIndex(4);
     setAnalysisResult(result);
     setIsAnalyzing(false);
-
-    try {
-      confetti({
-        particleCount: 50,
-        spread: 60,
-        origin: { y: 0.6 },
-        colors: ["#8B1E1E", "#10B981", "#F59E0B"],
-      });
-    } catch (e) {}
   };
 
-  const handleSave = () => {
-    if (onSaveAndReturn && analysisResult) {
-      const sim = analysisResult.pipelineResults?.similarityCheck || analysisResult.similarityCheck || {};
-      const isMismatch = (sim.isSameWound === false || sim.is_same_wound === false || (sim.similarityScore !== undefined && sim.similarityScore < 0.65) || (sim.similarity_score !== undefined && sim.similarity_score < 0.65));
-
-      if (isMismatch) {
-        const confirmSave = window.confirm(
-          `⚠️ WOUND MISMATCH DETECTED (${sim.confidence || '< 65%'})\n\nStage 1 (ResNet-50) detected that this photograph does NOT match the patient's baseline wound.\n\nAre you sure you want to log this scan to this specific wound history anyway?`
-        );
-        if (!confirmSave) return;
-      }
-
-      onSaveAndReturn(
-        selectedPatient?.id || selectedPatient?.custom_id,
-        analysisResult,
-        imagePreview,
-        scanDate,
-        selectedWoundId
-      );
-    }
+  const handleRetake = () => {
+    setAnalysisResult(null);
+    setImagePreview(null);
+    setStageIndex(-1);
+    setMismatchAcknowledged(false);
+    setCurrentStep(2);
   };
 
-  return (
-    <div style={{ padding: "18px 16px", display: "flex", flexDirection: "column", gap: "16px" }}>
-      {/* 3-Step Progress Indicator */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: "16px", margin: "4px 0 10px 0" }}>
-        {/* Step 1 */}
-        <div
-          style={{
-            width: "36px",
-            height: "36px",
-            borderRadius: "50%",
-            backgroundColor: currentStep >= 1 ? "#8B1E1E" : "#E2E8F0",
-            color: currentStep >= 1 ? "#FFFFFF" : "#64748B",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontWeight: "700",
-            fontSize: "0.9rem",
-            boxShadow: currentStep === 1 ? "0 0 0 4px rgba(139, 30, 30, 0.2)" : "none",
-            transition: "all 0.2s ease",
-          }}
-        >
-          1
-        </div>
-        <div style={{ width: "36px", height: "2px", backgroundColor: currentStep >= 2 ? "#8B1E1E" : "#CBD5E1" }} />
+  const sim = getSimilarity(analysisResult);
+  const isMismatch = analysisResult ? isSimilarityMismatch(sim) : false;
+  const canSave = analysisResult && (!isMismatch || mismatchAcknowledged) && !isSaving;
 
-        {/* Step 2 */}
-        <div
-          style={{
-            width: "36px",
-            height: "36px",
-            borderRadius: "50%",
-            backgroundColor: currentStep >= 2 ? "#8B1E1E" : "#E2E8F0",
-            color: currentStep >= 2 ? "#FFFFFF" : "#64748B",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontWeight: "700",
-            fontSize: "0.9rem",
-            boxShadow: currentStep === 2 ? "0 0 0 4px rgba(139, 30, 30, 0.2)" : "none",
-            transition: "all 0.2s ease",
-          }}
-        >
-          2
-        </div>
-        <div style={{ width: "36px", height: "2px", backgroundColor: currentStep >= 3 ? "#8B1E1E" : "#CBD5E1" }} />
+  const handleSave = async () => {
+    if (!canSave || !onSaveAndReturn) return;
+    setIsSaving(true);
+    if (onDirtyChange) onDirtyChange(false);
+    await onSaveAndReturn(
+      getPatientId(selectedPatient),
+      analysisResult,
+      imagePreview,
+      scanDate,
+      selectedWound?.id ?? null
+    );
+  };
 
-        {/* Step 3 */}
-        <div
-          style={{
-            width: "36px",
-            height: "36px",
-            borderRadius: "50%",
-            backgroundColor: currentStep >= 3 ? "#8B1E1E" : "#E2E8F0",
-            color: currentStep >= 3 ? "#FFFFFF" : "#64748B",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontWeight: "700",
-            fontSize: "0.9rem",
-            boxShadow: currentStep === 3 ? "0 0 0 4px rgba(139, 30, 30, 0.2)" : "none",
-            transition: "all 0.2s ease",
-          }}
-        >
-          3
-        </div>
-      </div>
+  const woundName = getWoundLabel(selectedWound, selectedPatient?.anatomicalLocation || "Wound Site");
+  const canGoBackTo = (stepId) => stepId < currentStep && !isAnalyzing && !analysisResult;
 
-      {/* ASSESSMENT DATE CUSTOMIZER CARD */}
-      <div
-        className="app-card"
-        style={{
-          background: "#F8FAFC",
-          border: "1px solid #E2E8F0",
-          padding: "12px 14px",
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <Calendar size={16} color="#8B1E1E" />
-            <div>
-              <span style={{ fontSize: "0.68rem", fontWeight: "700", color: "#64748B", textTransform: "uppercase", display: "block" }}>
-                Assessment Date
-              </span>
-              <strong style={{ fontSize: "0.86rem", color: "#0F172A" }}>
-                {formatDisplayDate(scanDate, true)}
-              </strong>
-            </div>
-          </div>
+  /* ---------------------------------------------------------------- */
 
-          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+  const renderStepper = () => (
+    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "center", gap: "6px", margin: "2px 0 4px 0" }}>
+      {STEPS.map((step, idx) => {
+        const done = currentStep > step.id || (step.id === 3 && analysisResult);
+        const active = currentStep === step.id;
+        const clickable = canGoBackTo(step.id);
+        return (
+          <React.Fragment key={step.id}>
             <button
               type="button"
-              onClick={() => handleShiftDate(1)}
+              onClick={() => clickable && setCurrentStep(step.id)}
+              disabled={!clickable}
+              aria-current={active ? "step" : undefined}
               style={{
-                background: "#FFFFFF",
-                border: "1px solid #CBD5E1",
-                borderRadius: "6px",
-                padding: "4px 8px",
-                fontSize: "0.72rem",
-                fontWeight: "600",
-                color: "#8B1E1E",
-                cursor: "pointer",
+                background: "none",
+                border: "none",
                 display: "flex",
+                flexDirection: "column",
                 alignItems: "center",
-                gap: "3px",
+                gap: "4px",
+                cursor: clickable ? "pointer" : "default",
+                padding: 0,
+                minWidth: "56px",
               }}
             >
-              <FastForward size={12} />
-              <span>+1d Next</span>
+              <span
+                style={{
+                  width: "32px",
+                  height: "32px",
+                  borderRadius: "50%",
+                  backgroundColor: done || active ? "#8B1E1E" : "#E2E8F0",
+                  color: done || active ? "#FFFFFF" : "#64748B",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontWeight: "800",
+                  fontSize: "0.85rem",
+                  boxShadow: active ? "0 0 0 4px rgba(139, 30, 30, 0.18)" : "none",
+                  transition: "all 0.2s ease",
+                }}
+              >
+                {done && !active ? <CheckCircle2 size={16} /> : step.id}
+              </span>
+              <span
+                style={{
+                  fontSize: "0.72rem",
+                  fontWeight: active ? "800" : "600",
+                  color: active ? "#8B1E1E" : "#64748B",
+                }}
+              >
+                {step.label}
+              </span>
             </button>
+            {idx < STEPS.length - 1 && (
+              <div
+                style={{
+                  width: "40px",
+                  height: "2px",
+                  marginTop: "15px",
+                  backgroundColor: currentStep > step.id ? "#8B1E1E" : "#CBD5E1",
+                }}
+              />
+            )}
+          </React.Fragment>
+        );
+      })}
+    </div>
+  );
 
-            <button
-              type="button"
-              onClick={() => setShowDateCustomizer(!showDateCustomizer)}
-              style={{
-                background: showDateCustomizer ? "#FEE2E2" : "#FFFFFF",
-                border: "1px solid #CBD5E1",
-                borderRadius: "6px",
-                padding: "4px 8px",
-                fontSize: "0.72rem",
-                fontWeight: "600",
-                color: "#334155",
-                cursor: "pointer",
-              }}
-            >
-              {showDateCustomizer ? "Close" : "Change ▾"}
-            </button>
+  // Compact "who/what is being scanned" summary shown on steps 2 and 3
+  const renderContextSummary = () => (
+    <div
+      className="app-card"
+      style={{ padding: "10px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", minWidth: 0 }}>
+        <UserCheck size={18} color="#16A34A" style={{ flexShrink: 0 }} />
+        <div style={{ minWidth: 0 }}>
+          <strong
+            style={{ fontSize: "0.86rem", color: "#0F172A", display: "block", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}
+          >
+            {selectedPatient?.name} <span style={{ color: "#94A3B8", fontWeight: 600 }}>#{getPatientId(selectedPatient)}</span>
+          </strong>
+          <span style={{ fontSize: "0.76rem", color: "#64748B", display: "flex", alignItems: "center", gap: "4px" }}>
+            <MapPin size={12} /> {woundName}
+          </span>
+        </div>
+      </div>
+      {canGoBackTo(1) && (
+        <button type="button" style={smallButton} onClick={() => setCurrentStep(1)}>
+          Change
+        </button>
+      )}
+    </div>
+  );
+
+  const renderDateRow = () => (
+    <div style={{ borderTop: "1px solid #E2E8F0", marginTop: "14px", paddingTop: "12px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+          <Calendar size={16} color="#64748B" />
+          <div style={{ minWidth: 0 }}>
+            <span style={{ fontSize: "0.68rem", fontWeight: "700", color: "#64748B", textTransform: "uppercase", display: "block" }}>
+              Assessment date
+            </span>
+            <strong style={{ fontSize: "0.82rem", color: "#0F172A" }}>{formatDisplayDate(scanDate, true)}</strong>
           </div>
         </div>
-
-        {showDateCustomizer && (
-          <div style={{ marginTop: "10px", paddingTop: "10px", borderTop: "1px solid #E2E8F0" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" }}>
-              <div>
-                <label style={{ fontSize: "0.7rem", color: "#64748B", fontWeight: "600", display: "block", marginBottom: "2px" }}>
-                  Date
-                </label>
-                <input
-                  type="date"
-                  value={formatDateInput(scanDate)}
-                  onChange={(e) => handleSetCustomDate(e.target.value)}
-                  style={{
-                    width: "100%",
-                    padding: "6px 8px",
-                    borderRadius: "6px",
-                    border: "1px solid #CBD5E1",
-                    fontSize: "0.78rem",
-                    background: "#FFFFFF",
-                  }}
-                />
-              </div>
-              <div>
-                <label style={{ fontSize: "0.7rem", color: "#64748B", fontWeight: "600", display: "block", marginBottom: "2px" }}>
-                  Time
-                </label>
-                <input
-                  type="time"
-                  value={formatTimeInput(scanDate)}
-                  onChange={(e) => handleSetCustomTime(e.target.value)}
-                  style={{
-                    width: "100%",
-                    padding: "6px 8px",
-                    borderRadius: "6px",
-                    border: "1px solid #CBD5E1",
-                    fontSize: "0.78rem",
-                    background: "#FFFFFF",
-                  }}
-                />
-              </div>
-            </div>
-
-            <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
-              <button
-                type="button"
-                onClick={handleResetToCurrentDate}
-                style={{
-                  background: "#FFFFFF",
-                  border: "1px solid #CBD5E1",
-                  borderRadius: "6px",
-                  padding: "4px 8px",
-                  fontSize: "0.72rem",
-                  color: "#64748B",
-                  cursor: "pointer",
-                }}
-              >
-                Reset to Current
-              </button>
-              <button
-                type="button"
-                onClick={() => handleShiftDate(3)}
-                style={{
-                  background: "#FFFFFF",
-                  border: "1px solid #CBD5E1",
-                  borderRadius: "6px",
-                  padding: "4px 8px",
-                  fontSize: "0.72rem",
-                  color: "#0F172A",
-                  cursor: "pointer",
-                }}
-              >
-                +3 Days
-              </button>
-              <button
-                type="button"
-                onClick={() => handleShiftDate(7)}
-                style={{
-                  background: "#FFFFFF",
-                  border: "1px solid #CBD5E1",
-                  borderRadius: "6px",
-                  padding: "4px 8px",
-                  fontSize: "0.72rem",
-                  color: "#0F172A",
-                  cursor: "pointer",
-                }}
-              >
-                +1 Week
-              </button>
-            </div>
-          </div>
-        )}
+        <button type="button" style={smallButton} onClick={() => setShowDateCustomizer(!showDateCustomizer)}>
+          {showDateCustomizer ? "Done" : "Edit"}
+        </button>
       </div>
 
-      {/* STEP 1: SELECT PATIENT */}
+      {showDateCustomizer && (
+        <div style={{ marginTop: "10px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginBottom: "8px" }}>
+            <label style={{ fontSize: "0.7rem", color: "#64748B", fontWeight: "600" }}>
+              Date
+              <input
+                type="date"
+                value={formatDateInput(scanDate)}
+                onChange={(e) => setCustomDate(e.target.value)}
+                style={{ width: "100%", padding: "7px 8px", borderRadius: "8px", border: "1px solid #CBD5E1", fontSize: "0.8rem", marginTop: "2px" }}
+              />
+            </label>
+            <label style={{ fontSize: "0.7rem", color: "#64748B", fontWeight: "600" }}>
+              Time
+              <input
+                type="time"
+                value={formatTimeInput(scanDate)}
+                onChange={(e) => setCustomTime(e.target.value)}
+                style={{ width: "100%", padding: "7px 8px", borderRadius: "8px", border: "1px solid #CBD5E1", fontSize: "0.8rem", marginTop: "2px" }}
+              />
+            </label>
+          </div>
+          <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
+            <button type="button" style={smallButton} onClick={() => setScanDate(getEffectiveDate())}>
+              Use current time
+            </button>
+            {isSimulationMode && (
+              <>
+                <button type="button" style={smallButton} onClick={() => shiftDate(1)}>+1 day</button>
+                <button type="button" style={smallButton} onClick={() => shiftDate(3)}>+3 days</button>
+                <button type="button" style={smallButton} onClick={() => shiftDate(7)}>+1 week</button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  /* ---------------- STEP 1: PATIENT & WOUND ---------------- */
+  const renderStepPatient = () => (
+    <>
       <div className="app-card" style={{ position: "relative" }}>
-        <span
-          style={{
-            fontSize: "0.72rem",
-            fontWeight: "700",
-            letterSpacing: "0.05em",
-            color: "#8B1E1E",
-            textTransform: "uppercase",
-            display: "block",
-            marginBottom: "8px",
-          }}
-        >
-          STEP 1: SELECT PATIENT
-        </span>
+        <span style={sectionLabel}>Patient</span>
 
         {patients.length === 0 ? (
-          <div style={{ padding: "12px", background: "#F8FAFC", borderRadius: "12px", border: "1px dashed #CBD5E1", textAlign: "center" }}>
-            <p style={{ fontSize: "0.85rem", color: "#64748B", marginBottom: "8px" }}>
-              No patient profiles exist yet. Create a patient first to link this scan.
+          <div style={{ padding: "14px", background: "#F8FAFC", borderRadius: "12px", border: "1px dashed #CBD5E1", textAlign: "center" }}>
+            <p style={{ fontSize: "0.85rem", color: "#64748B", marginBottom: "10px" }}>
+              No patients yet. Register one to link this scan.
             </p>
             {onOpenNewPatient && (
-              <button
-                type="button"
-                onClick={onOpenNewPatient}
-                className="btn-primary"
-                style={{ padding: "8px 14px", fontSize: "0.82rem", borderRadius: "8px" }}
-              >
-                + Enroll Patient Now
+              <button type="button" onClick={onOpenNewPatient} className="btn-primary" style={{ padding: "9px 14px", fontSize: "0.82rem" }}>
+                <Plus size={16} /> Register patient
               </button>
             )}
+          </div>
+        ) : selectedPatient && !showPatientDropdown ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "10px",
+              background: "#F0FDF4",
+              border: "1px solid #BBF7D0",
+              borderRadius: "12px",
+              padding: "10px 12px",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+              <UserCheck size={18} color="#16A34A" />
+              <strong style={{ fontSize: "0.88rem", color: "#14532D", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                {selectedPatient.name} <span style={{ fontWeight: 600, color: "#4D7C0F" }}>#{getPatientId(selectedPatient)}</span>
+              </strong>
+            </div>
+            <button type="button" style={smallButton} onClick={() => setShowPatientDropdown(true)}>
+              Change
+            </button>
           </div>
         ) : (
           <div style={{ position: "relative" }}>
@@ -447,7 +462,10 @@ export const AIAnalysisWizard = ({
               type="text"
               placeholder="Search by name or ID..."
               value={patientSearch}
+              autoFocus={Boolean(selectedPatient)}
               onFocus={() => setShowPatientDropdown(true)}
+              // delay so a tap on a result registers before the list closes
+              onBlur={() => setTimeout(() => setShowPatientDropdown(false), 150)}
               onChange={(e) => {
                 setPatientSearch(e.target.value);
                 setShowPatientDropdown(true);
@@ -462,46 +480,50 @@ export const AIAnalysisWizard = ({
                 outline: "none",
               }}
             />
-
             {showPatientDropdown && (
               <div
+                role="listbox"
                 style={{
-                  position: "absolute",
-                  top: "100%",
-                  left: 0,
-                  right: 0,
                   background: "#FFFFFF",
                   borderRadius: "12px",
-                  boxShadow: "0 10px 25px rgba(0,0,0,0.15)",
+                  boxShadow: "0 10px 25px rgba(0,0,0,0.12)",
                   border: "1px solid #E2E8F0",
-                  zIndex: 60,
-                  marginTop: "4px",
-                  maxHeight: "180px",
+                  marginTop: "6px",
+                  maxHeight: "240px",
                   overflowY: "auto",
                 }}
               >
                 {filteredPatients.length > 0 ? (
                   filteredPatients.map((p) => (
-                    <div
-                      key={p.id || p.custom_id}
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={getPatientId(p) === selectedPatientId}
+                      key={getPatientId(p)}
+                      onMouseDown={(e) => e.preventDefault()}
                       onClick={() => handlePatientSelect(p)}
                       style={{
-                        padding: "10px 14px",
+                        width: "100%",
+                        textAlign: "left",
+                        background: getPatientId(p) === selectedPatientId ? "#FEF2F2" : "#FFFFFF",
+                        border: "none",
+                        padding: "11px 14px",
                         borderBottom: "1px solid #F1F5F9",
                         cursor: "pointer",
                         display: "flex",
                         justifyContent: "space-between",
                         alignItems: "center",
+                        gap: "8px",
                       }}
                     >
-                      <div>
+                      <span style={{ minWidth: 0 }}>
                         <strong style={{ fontSize: "0.88rem", color: "#1E293B" }}>{p.name}</strong>
-                        <span style={{ fontSize: "0.76rem", color: "#64748B", marginLeft: "6px" }}>
-                          ({p.woundType})
+                        <span style={{ fontSize: "0.74rem", color: "#64748B", display: "block" }}>
+                          {(p.wounds?.length || 1)} wound site{(p.wounds?.length || 1) === 1 ? "" : "s"}
                         </span>
-                      </div>
-                      <span style={{ fontSize: "0.76rem", color: "#94A3B8" }}>#{p.id || p.custom_id}</span>
-                    </div>
+                      </span>
+                      <span style={{ fontSize: "0.76rem", color: "#94A3B8" }}>#{getPatientId(p)}</span>
+                    </button>
                   ))
                 ) : (
                   <div style={{ padding: "12px", textAlign: "center", color: "#94A3B8", fontSize: "0.82rem" }}>
@@ -512,155 +534,115 @@ export const AIAnalysisWizard = ({
             )}
           </div>
         )}
-
-        {selectedPatient && (
-          <div style={{ marginTop: "10px", display: "flex", alignItems: "center", gap: "8px" }}>
-            <UserCheck size={16} color="#16A34A" />
-            <span style={{ fontSize: "0.8rem", color: "#166534", fontWeight: "600" }}>
-              Active Patient: {selectedPatient.name} (#{selectedPatient.id || selectedPatient.custom_id})
-            </span>
-          </div>
-        )}
       </div>
 
-      {/* TARGET WOUND SITE SELECTOR */}
-      {selectedPatient && (
-        <div
-          className="app-card"
-          style={{
-            background: "#FFFBF7",
-            border: "1.5px solid #FED7AA",
-            padding: "14px",
-          }}
-        >
+      {selectedPatient && !showPatientDropdown && (
+        <div className="app-card">
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-              <MapPin size={16} color="#C2410C" />
-              <span style={{ fontSize: "0.74rem", fontWeight: "800", color: "#9A3412", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-                Target Wound Site
-              </span>
-            </div>
-
+            <span style={{ ...sectionLabel, marginBottom: 0 }}>Wound site</span>
             <button
               type="button"
-              onClick={() => setIsAddingWoundInWizard(!isAddingWoundInWizard)}
-              style={{
-                background: isAddingWoundInWizard ? "#FED7AA" : "#FFFFFF",
-                border: "1px solid #FDBA74",
-                borderRadius: "6px",
-                padding: "3px 8px",
-                fontSize: "0.7rem",
-                fontWeight: "700",
-                color: "#C2410C",
-                cursor: "pointer",
-                display: "flex",
-                alignItems: "center",
-                gap: "3px",
-              }}
+              onClick={() => setIsAddingWound(!isAddingWound)}
+              style={{ ...smallButton, display: "flex", alignItems: "center", gap: "4px", color: "#8B1E1E" }}
             >
-              <Plus size={12} />
-              <span>{isAddingWoundInWizard ? "Cancel" : "+ Add Wound Site"}</span>
+              {isAddingWound ? "Cancel" : (<><Plus size={12} /> New site</>)}
             </button>
           </div>
 
-          {/* Inline Add Wound Form */}
-          {isAddingWoundInWizard && (
-            <div style={{ background: "#FFFFFF", border: "1px solid #FED7AA", borderRadius: "10px", padding: "10px", marginBottom: "10px" }}>
-              <div style={{ marginBottom: "8px" }}>
-                <label style={{ display: "block", fontSize: "0.7rem", fontWeight: "700", color: "#475569", marginBottom: "2px" }}>
-                  Anatomical Location *
-                </label>
+          {isAddingWound && (
+            <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: "10px", padding: "10px", marginBottom: "10px" }}>
+              <label style={{ display: "block", fontSize: "0.72rem", fontWeight: "700", color: "#475569", marginBottom: "4px" }}>
+                Anatomical location
                 <input
                   type="text"
                   placeholder="e.g. Sacrum, Right Knee, Left Heel"
-                  value={wizardNewWound.anatomicalLocation}
-                  onChange={(e) => setWizardNewWound({ ...wizardNewWound, anatomicalLocation: e.target.value })}
-                  style={{ width: "100%", padding: "7px 10px", borderRadius: "6px", border: "1px solid #CBD5E1", fontSize: "0.78rem" }}
+                  value={newWoundLocation}
+                  onChange={(e) => setNewWoundLocation(e.target.value)}
+                  style={{ width: "100%", padding: "8px 10px", borderRadius: "8px", border: "1px solid #CBD5E1", fontSize: "0.82rem", marginTop: "3px", fontWeight: 500 }}
                 />
-              </div>
-
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px" }}>
-                <span style={{ fontSize: "0.7rem", color: "#166534" }}>
-                  ✨ AI will automatically classify the wound type upon scanning.
-                </span>
+              </label>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "8px", marginTop: "6px" }}>
+                <span style={{ fontSize: "0.7rem", color: "#64748B" }}>Wound type is classified by the scan.</span>
                 <button
                   type="button"
-                  disabled={isSavingWoundInWizard || !wizardNewWound.anatomicalLocation.trim()}
-                  onClick={async () => {
-                    setIsSavingWoundInWizard(true);
-                    const pId = selectedPatient.id || selectedPatient.custom_id;
-                    const res = await api.addWoundToPatient(pId, {
-                      ...wizardNewWound,
-                      woundType: "Pending AI Scan",
-                      label: wizardNewWound.label || wizardNewWound.anatomicalLocation,
-                    });
-                    if (res && res.wounds) {
-                      const latestWound = res.wounds[res.wounds.length - 1];
-                      if (latestWound) setSelectedWoundId(latestWound.id);
-                    }
-                    setIsSavingWoundInWizard(false);
-                    setIsAddingWoundInWizard(false);
-                    setWizardNewWound({ anatomicalLocation: "", woundType: "Pending AI Scan", label: "" });
-                  }}
-                  style={{
-                    background: "#8B1E1E",
-                    color: "#FFFFFF",
-                    border: "none",
-                    borderRadius: "6px",
-                    padding: "5px 12px",
-                    fontSize: "0.75rem",
-                    fontWeight: "700",
-                    cursor: "pointer",
-                  }}
+                  disabled={isSavingWound || !newWoundLocation.trim()}
+                  onClick={handleCreateWound}
+                  className="btn-primary"
+                  style={{ padding: "6px 12px", fontSize: "0.76rem", borderRadius: "8px", opacity: !newWoundLocation.trim() ? 0.5 : 1 }}
                 >
-                  {isSavingWoundInWizard ? "Saving..." : "Create & Select Wound"}
+                  {isSavingWound ? "Saving..." : "Add site"}
                 </button>
               </div>
             </div>
           )}
 
-          {/* Wound Dropdown Selector */}
-          {selectedPatient.wounds && selectedPatient.wounds.length > 0 ? (
-            <div>
-              <select
-                value={selectedWoundId || (selectedPatient.wounds[0]?.id ?? "")}
-                onChange={(e) => setSelectedWoundId(Number(e.target.value) || e.target.value)}
-                style={{
-                  width: "100%",
-                  padding: "10px 12px",
-                  borderRadius: "10px",
-                  border: "1.5px solid #FDBA74",
-                  fontSize: "0.86rem",
-                  fontWeight: "700",
-                  color: "#7C2D12",
-                  background: "#FFFFFF",
-                  outline: "none",
-                  cursor: "pointer",
-                }}
-              >
-                {selectedPatient.wounds.map((w, idx) => (
-                  <option key={w.id || idx} value={w.id}>
-                    {w.label || w.anatomical_location || `Wound Site #${idx + 1}`} ({w.wound_type})
-                  </option>
-                ))}
-              </select>
-              <span style={{ fontSize: "0.72rem", color: "#9A3412", display: "block", marginTop: "4px" }}>
-                AI assessment metrics and tissue progress will be logged under this specific wound.
-              </span>
+          {patientWounds.length > 0 ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {patientWounds.map((w, idx) => {
+                const checked = selectedWound?.id === w.id;
+                return (
+                  <label
+                    key={w.id ?? idx}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "10px",
+                      padding: "10px 12px",
+                      borderRadius: "12px",
+                      border: checked ? "1.5px solid #8B1E1E" : "1px solid #E2E8F0",
+                      background: checked ? "#FEF2F2" : "#FFFFFF",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="wound-site"
+                      checked={checked}
+                      onChange={() => setSelectedWoundId(w.id)}
+                      style={{ accentColor: "#8B1E1E" }}
+                    />
+                    <span style={{ minWidth: 0 }}>
+                      <strong style={{ fontSize: "0.86rem", color: "#0F172A", display: "block" }}>
+                        {getWoundLabel(w, `Wound Site #${idx + 1}`)}
+                      </strong>
+                      <span style={{ fontSize: "0.74rem", color: "#64748B" }}>
+                        {w.wound_type && w.wound_type !== "Pending AI Scan" ? w.wound_type : "Not yet classified"}
+                        {" · "}
+                        {(w.scans?.length || 0)} scan{(w.scans?.length || 0) === 1 ? "" : "s"}
+                      </span>
+                    </span>
+                  </label>
+                );
+              })}
             </div>
           ) : (
-            <div style={{ fontSize: "0.82rem", color: "#7C2D12" }}>
-              Scanning <strong>{selectedPatient.anatomicalLocation || "Lower Extremity"}</strong> ({selectedPatient.woundType || "Primary Wound"})
+            <div style={{ fontSize: "0.84rem", color: "#334155" }}>
+              Scanning <strong>{woundName}</strong>
             </div>
           )}
         </div>
       )}
 
-      {/* STEP 2: UPLOAD PICTURE */}
+      <button
+        type="button"
+        className="btn-primary"
+        disabled={!selectedPatient || showPatientDropdown}
+        onClick={() => setCurrentStep(2)}
+        style={{ width: "100%", padding: "14px", opacity: !selectedPatient || showPatientDropdown ? 0.5 : 1 }}
+      >
+        <span>Continue to photo</span>
+        <ArrowRight size={18} />
+      </button>
+    </>
+  );
+
+  /* ---------------- STEP 2: PHOTO ---------------- */
+  const renderStepPhoto = () => (
+    <>
+      {renderContextSummary()}
+
       <div className="app-card">
-        <h3 style={{ fontSize: "1.15rem", fontWeight: "800", color: "#0F172A", marginBottom: "12px" }}>
-          Upload Picture
-        </h3>
+        <span style={sectionLabel}>Wound photo</span>
 
         <input
           type="file"
@@ -671,24 +653,21 @@ export const AIAnalysisWizard = ({
           style={{ display: "none" }}
         />
 
-        <div
+        <button
+          type="button"
           className={`camera-upload-dropzone ${imagePreview ? "has-file" : ""}`}
           onClick={() => fileInputRef.current?.click()}
+          style={{ width: "100%" }}
         >
           {imagePreview ? (
             <div style={{ width: "100%", display: "flex", flexDirection: "column", alignItems: "center" }}>
               <img
                 src={imagePreview}
-                alt="Wound Capture"
-                style={{
-                  maxHeight: "180px",
-                  borderRadius: "12px",
-                  objectFit: "cover",
-                  border: "2px solid #8B1E1E",
-                }}
+                alt="Selected wound photo"
+                style={{ maxHeight: "200px", maxWidth: "100%", borderRadius: "12px", objectFit: "cover" }}
               />
-              <span style={{ fontSize: "0.78rem", color: "#166534", fontWeight: "600", marginTop: "8px" }}>
-                ✓ Image Selected (Tap to retake)
+              <span style={{ fontSize: "0.78rem", color: "#166534", fontWeight: "700", marginTop: "8px" }}>
+                Photo ready · tap to retake
               </span>
             </div>
           ) : (
@@ -708,290 +687,228 @@ export const AIAnalysisWizard = ({
               >
                 <Camera size={28} />
               </div>
-              <strong style={{ fontSize: "0.95rem", color: "#1E293B" }}>
-                Tap to take a photo or choose file
-              </strong>
-              <p style={{ fontSize: "0.78rem", color: "#64748B", marginTop: "4px" }}>
-                Use device camera or upload an image from files
+              <strong style={{ fontSize: "0.95rem", color: "#1E293B" }}>Take or choose a photo</strong>
+              <p style={{ fontSize: "0.76rem", color: "#64748B", marginTop: "6px", lineHeight: 1.45 }}>
+                Good light, camera parallel to the wound,
+                <br />
+                whole wound edge in frame
               </p>
-            </>
-          )}
-        </div>
-
-        <button
-          onClick={handleStartAnalysis}
-          disabled={isAnalyzing}
-          className="btn-primary"
-          style={{ width: "100%", marginTop: "16px", padding: "14px" }}
-        >
-          {isAnalyzing ? (
-            <>
-              <RefreshCw size={20} className="spin-animation" />
-              <span>Analyzing Wound Pipeline...</span>
-            </>
-          ) : (
-            <>
-              <Microscope size={20} />
-              <span>Start AI Analysis</span>
             </>
           )}
         </button>
+
+        {renderDateRow()}
       </div>
 
-      {/* STEP 3: ANALYSIS RESULT */}
-      <div className="app-card" style={{ padding: "20px 16px" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
-          <h3 style={{ fontSize: "1.15rem", fontWeight: "800", color: "#0F172A" }}>
-            Analysis Result
-          </h3>
-          <span
-            style={{
-              fontSize: "0.7rem",
-              fontWeight: "700",
-              letterSpacing: "0.04em",
-              padding: "4px 10px",
-              borderRadius: "999px",
-              backgroundColor: analysisResult ? "#DCFCE7" : "#FEF3C7",
-              color: analysisResult ? "#166534" : "#92400E",
-              border: analysisResult ? "1px solid #BBF7D0" : "1px solid #FDE68A",
-            }}
-          >
-            {analysisResult ? "COMPLETE" : isAnalyzing ? "PROCESSING" : "WAITING"}
-          </span>
+      <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "10px" }}>
+        <button type="button" className="btn-secondary" onClick={() => setCurrentStep(1)} aria-label="Back to patient">
+          <ArrowLeft size={18} />
+        </button>
+        <button
+          type="button"
+          onClick={handleStartAnalysis}
+          disabled={!imagePreview || isAnalyzing}
+          className="btn-primary"
+          style={{ padding: "14px", opacity: !imagePreview ? 0.5 : 1 }}
+        >
+          <Microscope size={20} />
+          <span>{imagePreview ? "Analyze wound" : "Add a photo to analyze"}</span>
+        </button>
+      </div>
+    </>
+  );
+
+  /* ---------------- STEP 3: RESULT ---------------- */
+  const renderAnalyzing = () => (
+    <div className="app-card" style={{ padding: "22px 18px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "16px" }}>
+        <RefreshCw size={20} color="#8B1E1E" className="spin-animation" />
+        <strong style={{ fontSize: "1rem", color: "#0F172A" }}>Analyzing wound…</strong>
+      </div>
+      <ol style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: "12px" }}>
+        {ANALYSIS_STAGES.map((label, i) => {
+          const done = stageIndex > i;
+          const running = stageIndex === i;
+          return (
+            <li key={label} style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+              {done ? (
+                <CheckCircle2 size={18} color="#16A34A" />
+              ) : running ? (
+                <RefreshCw size={18} color="#8B1E1E" className="spin-animation" />
+              ) : (
+                <Circle size={18} color="#CBD5E1" />
+              )}
+              <span
+                style={{
+                  fontSize: "0.85rem",
+                  fontWeight: running ? "700" : "500",
+                  color: done ? "#166534" : running ? "#0F172A" : "#94A3B8",
+                }}
+              >
+                {label}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+
+  const renderSimilarityBanner = () => {
+    if (isMismatch) {
+      return (
+        <div
+          role="alert"
+          style={{
+            background: "#FEF2F2",
+            border: "2px solid #EF4444",
+            borderRadius: "14px",
+            padding: "14px",
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <AlertTriangle size={20} color="#DC2626" />
+            <strong style={{ fontSize: "0.9rem", color: "#991B1B" }}>This may be a different wound</strong>
+          </div>
+          <p style={{ fontSize: "0.8rem", color: "#7F1D1D", margin: 0, lineHeight: 1.45 }}>
+            {sim.warning ||
+              `The photo only matches the Day 1 baseline of ${woundName} at ${sim.confidence || "below 65%"}. Check you selected the right patient and wound site.`}
+          </p>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: "8px", fontSize: "0.8rem", color: "#7F1D1D", fontWeight: 600, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={mismatchAcknowledged}
+              onChange={(e) => setMismatchAcknowledged(e.target.checked)}
+              style={{ marginTop: "2px", accentColor: "#B91C1C" }}
+            />
+            <span>I've checked — this is {woundName}. Save it to this timeline anyway.</span>
+          </label>
+        </div>
+      );
+    }
+
+    const isBaseline = sim.isBaseline || sim.is_baseline;
+    const tone = isBaseline
+      ? { bg: "#EFF6FF", border: "#BFDBFE", color: "#1D4ED8", icon: "#2563EB" }
+      : { bg: "#F0FDF4", border: "#BBF7D0", color: "#166534", icon: "#16A34A" };
+    return (
+      <div
+        style={{
+          background: tone.bg,
+          border: `1px solid ${tone.border}`,
+          borderRadius: "12px",
+          padding: "10px 12px",
+          display: "flex",
+          alignItems: "center",
+          gap: "8px",
+          color: tone.color,
+          fontSize: "0.8rem",
+          fontWeight: "600",
+        }}
+      >
+        <CheckCircle2 size={16} color={tone.icon} style={{ flexShrink: 0 }} />
+        <span>
+          {isBaseline ? (
+            <>First scan of <strong>{woundName}</strong> — saved as the Day 1 baseline for future comparisons.</>
+          ) : (
+            <>Matches the {woundName} baseline{sim.confidence ? ` (${sim.confidence})` : ""}.</>
+          )}
+        </span>
+      </div>
+    );
+  };
+
+  const renderResult = () => {
+    const severityTone = toneFor("severity", null, analysisResult.severityScore);
+    const healingTone = toneFor("healing", analysisResult.healingStatus);
+    const typeTone = toneFor("type");
+    const tiles = [
+      { label: "Wound type", value: analysisResult.woundType, tone: typeTone },
+      { label: "Severity", value: analysisResult.severityLevel, tone: severityTone },
+      { label: "Healing", value: analysisResult.healingStatus, tone: healingTone },
+    ];
+
+    return (
+      <div className="app-card" style={{ padding: "18px 16px", display: "flex", flexDirection: "column", gap: "16px" }}>
+        {renderSimilarityBanner()}
+
+        <div style={{ display: "flex", justifyContent: "center" }}>
+          <CircularGauge score={analysisResult.severityScore} subtitle="SEVERITY SCORE" size={130} />
         </div>
 
-        {isAnalyzing && (
-          <div style={{ padding: "28px 12px", textAlign: "center" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: "8px" }}>
+          {tiles.map((t) => (
             <div
+              key={t.label}
               style={{
-                width: "48px",
-                height: "48px",
-                borderRadius: "50%",
-                border: "4px solid #FEE2E2",
-                borderTopColor: "#8B1E1E",
-                margin: "0 auto 16px auto",
-                animation: "spin 0.8s linear infinite",
-              }}
-            />
-            <p style={{ fontSize: "0.88rem", fontWeight: "700", color: "#8B1E1E" }}>
-              {analysisStage}
-            </p>
-            <p style={{ fontSize: "0.76rem", color: "#64748B", marginTop: "4px" }}>
-              Running sequential inference: ResNet50 → FUSegNet → VGG16 → FPN
-            </p>
-          </div>
-        )}
-
-        {!isAnalyzing && !analysisResult && (
-          <div style={{ padding: "32px 12px", textAlign: "center", color: "#94A3B8" }}>
-            <Microscope size={44} color="#CBD5E1" style={{ margin: "0 auto 10px auto" }} />
-            <p style={{ fontSize: "0.95rem", fontWeight: "600", color: "#64748B" }}>
-              Awaiting input
-            </p>
-            <p style={{ fontSize: "0.78rem", color: "#94A3B8", marginTop: "2px" }}>
-              Upload a photograph and tap "Start AI Analysis"
-            </p>
-          </div>
-        )}
-
-        {!isAnalyzing && analysisResult && (
-          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
-
-            {/* STAGE 1 RESNET-50 SIMILARITY CHECK BANNER */}
-            {(() => {
-              const sim = analysisResult.pipelineResults?.similarityCheck || analysisResult.similarityCheck || {};
-              const isMismatch = (sim.isSameWound === false || sim.is_same_wound === false || (sim.similarityScore !== undefined && sim.similarityScore < 0.65) || (sim.similarity_score !== undefined && sim.similarity_score < 0.65));
-              const isBaseline = sim.isBaseline || sim.is_baseline;
-
-              if (isMismatch) {
-                return (
-                  <div
-                    style={{
-                      background: "#FEF2F2",
-                      border: "2px solid #EF4444",
-                      borderRadius: "14px",
-                      padding: "14px",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "8px",
-                      boxShadow: "0 4px 12px rgba(239, 68, 68, 0.15)",
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                      <AlertTriangle size={20} color="#DC2626" />
-                      <strong style={{ fontSize: "0.88rem", color: "#991B1B" }}>
-                        ⚠️ WOUND MISMATCH DETECTED (Stage 1: ResNet-50)
-                      </strong>
-                    </div>
-                    <p style={{ fontSize: "0.8rem", color: "#7F1D1D", margin: 0, lineHeight: "1.4" }}>
-                      {sim.warning || `Visual similarity with Day 1 baseline is only ${sim.confidence || "low"} (below 65% threshold). This photograph does NOT appear to be the same wound as Day 1.`}
-                    </p>
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: "0.74rem", background: "#FFFFFF", padding: "6px 10px", borderRadius: "8px", border: "1px solid #FECDD3" }}>
-                      <span style={{ color: "#991B1B", fontWeight: "700" }}>Similarity Score: {sim.confidence || "< 65%"}</span>
-                      <span style={{ color: "#64748B" }}>Threshold: 65.0%</span>
-                    </div>
-                  </div>
-                );
-              }
-
-              const targetWound = selectedPatient?.wounds?.find((w) => w.id === selectedWoundId) || (selectedPatient?.wounds?.[0]);
-              const woundName = targetWound?.label || targetWound?.anatomical_location || selectedPatient?.anatomicalLocation || "Wound Site";
-
-              if (isBaseline) {
-                return (
-                  <div
-                    style={{
-                      background: "#EFF6FF",
-                      border: "1px solid #BFDBFE",
-                      borderRadius: "12px",
-                      padding: "10px 12px",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "8px",
-                      color: "#1D4ED8",
-                      fontSize: "0.78rem",
-                      fontWeight: "600",
-                    }}
-                  >
-                    <CheckCircle2 size={16} color="#2563EB" />
-                    <span>Stage 1 (ResNet-50): <strong>Day 1 Baseline Established for {woundName}</strong> (First scan reference for future follow-ups).</span>
-                  </div>
-                );
-              }
-
-              return (
-                <div
-                  style={{
-                    background: "#F0FDF4",
-                    border: "1px solid #BBF7D0",
-                    borderRadius: "12px",
-                    padding: "10px 12px",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "8px",
-                    color: "#166534",
-                    fontSize: "0.78rem",
-                    fontWeight: "600",
-                  }}
-                >
-                  <CheckCircle2 size={16} color="#16A34A" />
-                  <span>Stage 1 (ResNet-50): <strong>Match Confirmed ({sim.confidence})</strong> with {woundName} Day 1 baseline.</span>
-                </div>
-              );
-            })()}
-
-            {/* Severity Gauge */}
-            <div style={{ display: "flex", justifyContent: "center", padding: "8px 0" }}>
-              <CircularGauge
-                score={analysisResult.severityScore}
-                subtitle="SEVERITY SCORE"
-                size={130}
-              />
-            </div>
-
-            {/* 3 Metric Cards */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px" }}>
-              {/* Wound Type */}
-              <div
-                style={{
-                  background: "#FFF1F2",
-                  border: "1px solid #FECDD3",
-                  borderRadius: "12px",
-                  padding: "10px 8px",
-                  textAlign: "center",
-                }}
-              >
-                <span style={{ fontSize: "0.64rem", fontWeight: "700", color: "#9F1239", textTransform: "uppercase", display: "block" }}>
-                  Wound Type
-                </span>
-                <strong style={{ fontSize: "0.82rem", color: "#881337", marginTop: "2px", display: "block" }}>
-                  {analysisResult.woundType}
-                </strong>
-              </div>
-
-              {/* Severity Level */}
-              <div
-                style={{
-                  background: "#FFFBEB",
-                  border: "1px solid #FDE68A",
-                  borderRadius: "12px",
-                  padding: "10px 8px",
-                  textAlign: "center",
-                }}
-              >
-                <span style={{ fontSize: "0.64rem", fontWeight: "700", color: "#92400E", textTransform: "uppercase", display: "block" }}>
-                  Severity Level
-                </span>
-                <strong style={{ fontSize: "0.82rem", color: "#78350F", marginTop: "2px", display: "block" }}>
-                  {analysisResult.severityLevel}
-                </strong>
-              </div>
-
-              {/* Healing Status */}
-              <div
-                style={{
-                  background: "#F0FDF4",
-                  border: "1px solid #BBF7D0",
-                  borderRadius: "12px",
-                  padding: "10px 8px",
-                  textAlign: "center",
-                }}
-              >
-                <span style={{ fontSize: "0.64rem", fontWeight: "700", color: "#166534", textTransform: "uppercase", display: "block" }}>
-                  Healing Status
-                </span>
-                <strong style={{ fontSize: "0.82rem", color: "#14532D", marginTop: "2px", display: "block" }}>
-                  {analysisResult.healingStatus}
-                </strong>
-              </div>
-            </div>
-
-            {/* AI Recommendation */}
-            <div
-              style={{
-                background: "#F8FAFC",
-                border: "1px solid #E2E8F0",
-                borderRadius: "14px",
-                padding: "12px 14px",
+                background: t.tone.bg,
+                border: `1px solid ${t.tone.border}`,
+                borderRadius: "12px",
+                padding: "10px 6px",
+                textAlign: "center",
               }}
             >
-              <span style={{ fontSize: "0.68rem", fontWeight: "700", color: "#64748B", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>
-                AI RECOMMENDATION
+              <span style={{ fontSize: "0.64rem", fontWeight: "700", color: t.tone.label, textTransform: "uppercase", display: "block" }}>
+                {t.label}
               </span>
-              <p style={{ fontSize: "0.82rem", color: "#1E293B", lineHeight: "1.4", fontWeight: "500" }}>
-                {analysisResult.recommendation}
-              </p>
+              <strong style={{ fontSize: "0.82rem", color: t.tone.text, marginTop: "2px", display: "block", overflowWrap: "anywhere" }}>
+                {t.value || "—"}
+              </strong>
             </div>
+          ))}
+        </div>
 
-            {/* Scan Timestamp Confirmation */}
-            <div style={{ textAlign: "center", padding: "2px 0" }}>
-              <span style={{ fontSize: "0.74rem", color: "#64748B" }}>
-                Logging scan as: <strong style={{ color: "#0F172A" }}>{formatDisplayDate(scanDate, true)}</strong>
-              </span>
-            </div>
+        <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: "14px", padding: "12px 14px" }}>
+          <span style={{ fontSize: "0.68rem", fontWeight: "700", color: "#64748B", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>
+            Suggested care plan
+          </span>
+          <p style={{ fontSize: "0.84rem", color: "#1E293B", lineHeight: 1.45, fontWeight: "500" }}>
+            {analysisResult.recommendation}
+          </p>
+          <p style={{ fontSize: "0.7rem", color: "#94A3B8", marginTop: "8px" }}>
+            AI-generated decision support. Confirm with clinical judgement.
+          </p>
+        </div>
 
-            {/* Action Buttons */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginTop: "4px" }}>
-              <button
-                type="button"
-                onClick={onCancel}
-                className="btn-secondary"
-                style={{ fontSize: "0.85rem", padding: "12px 8px" }}
-              >
-                ← Back
-              </button>
-              <button
-                type="button"
-                onClick={handleSave}
-                className="btn-primary"
-                style={{ fontSize: "0.85rem", padding: "12px 8px" }}
-              >
-                💾 Save Assessment
-              </button>
-            </div>
-          </div>
-        )}
+        <div style={{ textAlign: "center", fontSize: "0.76rem", color: "#64748B" }}>
+          Will be logged to <strong style={{ color: "#0F172A" }}>{woundName}</strong> on{" "}
+          <strong style={{ color: "#0F172A" }}>{formatDisplayDate(scanDate, true)}</strong>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1.4fr", gap: "10px" }}>
+          <button type="button" onClick={handleRetake} className="btn-secondary" style={{ fontSize: "0.85rem", padding: "12px 8px" }}>
+            <Camera size={16} />
+            <span>Retake</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={!canSave}
+            className="btn-primary"
+            style={{ fontSize: "0.88rem", padding: "12px 8px", opacity: canSave ? 1 : 0.5 }}
+          >
+            {isSaving ? <RefreshCw size={16} className="spin-animation" /> : <Save size={16} />}
+            <span>{isSaving ? "Saving…" : "Save to timeline"}</span>
+          </button>
+        </div>
       </div>
+    );
+  };
+
+  return (
+    <div style={{ padding: "16px", display: "flex", flexDirection: "column", gap: "14px" }}>
+      {renderStepper()}
+      {currentStep === 1 && renderStepPatient()}
+      {currentStep === 2 && renderStepPhoto()}
+      {currentStep === 3 && (
+        <>
+          {renderContextSummary()}
+          {isAnalyzing || !analysisResult ? renderAnalyzing() : renderResult()}
+        </>
+      )}
     </div>
   );
 };

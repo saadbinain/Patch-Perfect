@@ -97,7 +97,9 @@ class PatientViewSet(viewsets.ModelViewSet):
 
         wound_type = data.get('woundType') or 'Pending AI Scan'
         anatomical_location = data.get('anatomicalLocation', 'Lower Extremity')
-        label = data.get('label') or data.get('woundLabel') or f"{anatomical_location} {wound_type}".strip() or 'Primary Wound'
+        # Label by site only: the wound type is set later by the AI scan, so baking
+        # "Pending AI Scan" into the label would leave it stale forever.
+        label = data.get('label') or data.get('woundLabel') or anatomical_location or 'Primary Wound'
 
         WoundProfile.objects.create(
             patient=patient,
