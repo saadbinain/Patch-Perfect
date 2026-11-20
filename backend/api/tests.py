@@ -398,7 +398,12 @@ class CropPipelineTests(unittest.TestCase):
         if mask is not None and mask.any():
             ys, xs = np.nonzero(mask)
             bbox = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
-        manager._segment = lambda img: (mask, bbox, float(mask.mean()) if mask is not None else None)
+        def segment(img, exclude=None):
+            m = None if mask is None else mask.copy()
+            if m is not None and exclude is not None:
+                m[exclude > 0] = 0
+            return m, bbox, float(m.mean()) if m is not None else None
+        manager._segment = segment
         return manager
 
     @staticmethod
@@ -543,3 +548,42 @@ class ColourCardTests(unittest.TestCase):
         result = manager.run_inference(CropPipelineTests.wound_photo())
         self.assertIsNone(result["pipeline_metrics"]["segmentation"]["wound_area_cm2"])
         self.assertTrue(any("Colour card not found" in w for w in result["warnings"]))
+
+
+class WoundRegionSelectionTests(unittest.TestCase):
+    @staticmethod
+    def blob(mask, cx, cy, r):
+        import cv2
+        cv2.circle(mask, (cx, cy), r, 1, -1)
+        return mask
+
+    def test_ragged_edge_band_is_dropped_and_wound_kept(self):
+        mask = self.blob(np.zeros((512, 512), np.uint8), 256, 230, 70)
+        # hair band: a ragged strip along the bottom edge, bigger than the wound
+        for x in range(0, 512, 24):
+            mask[440 + (x % 48) // 3:512, x:x + 16] = 1
+        mask[470:512, :] = 1
+        selected = pipeline_loader._select_wound_regions(mask)
+        self.assertTrue(selected[230, 256])
+        self.assertFalse(selected[500, 100])
+
+    def test_nearby_fragments_of_a_patchy_wound_are_kept(self):
+        mask = self.blob(np.zeros((512, 512), np.uint8), 256, 256, 50)
+        self.blob(mask, 330, 270, 18)  # second patch of the same wound
+        self.blob(mask, 60, 60, 20)    # unrelated blob far away
+        selected = pipeline_loader._select_wound_regions(mask)
+        self.assertTrue(selected[270, 330])
+        self.assertFalse(selected[60, 60])
+
+    def test_ai_box_ignores_colour_card(self):
+        img, wound = card_scene(40)
+        mask = np.zeros((512, 512), np.uint8)
+        sx, sy = 512 / img.width, 512 / img.height
+        mask[int(wound[1] * sy):int(wound[3] * sy), int(wound[0] * sx):int(wound[2] * sx)] = 1
+        # segmenter also fires on the card's red and magenta patches
+        mask[int(40 * sy):int(200 * sy), int(40 * sx):int(200 * sx)] = 1
+        result = CropPipelineTests().manager_with_mask(mask).run_inference(img)
+        x1, y1, _, _ = result["pipeline_metrics"]["segmentation"]["bounding_box"]
+        self.assertGreater(x1, 200 * sx)
+        self.assertGreater(y1, 200 * sy)
+        self.assertAlmostEqual(result["pipeline_metrics"]["segmentation"]["wound_area_cm2"], 12.0, delta=1.0)

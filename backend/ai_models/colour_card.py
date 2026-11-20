@@ -111,7 +111,7 @@ def _find_block(hsv, min_area):
             best = (chosen, total)
 
     if best is None:
-        return None, None
+        return None, None, None
     chosen, _ = best
     union = np.zeros(hsv.shape[:2], np.uint8)
     for labels, c in chosen.values():
@@ -122,7 +122,7 @@ def _find_block(hsv, min_area):
     hull = cv2.convexHull(pts)
     block = np.zeros_like(union)
     cv2.fillConvexPoly(block, hull, 1)
-    return block, float(cv2.contourArea(hull))
+    return block, float(cv2.contourArea(hull)), hull.reshape(-1, 2)
 
 
 def _white_balance(rgb, hsv, block_mask, block_area):
@@ -150,9 +150,12 @@ def detect_colour_card(pil_image):
       pixels_per_cm       on the detection image; None if not detected
       photo_area_cm2      real area the whole photo covers; None if not detected
       white_balance_gains [r, g, b] or None
+      block_polygon       outline of the reference block, normalised [[x, y], ...]
+                          (0..1 of photo width/height), or None
     """
     result = {"detected": False, "block_area_ratio": None, "pixels_per_cm": None,
-              "photo_area_cm2": None, "white_balance_gains": None, "card_white_rgb": None}
+              "photo_area_cm2": None, "white_balance_gains": None, "card_white_rgb": None,
+              "block_polygon": None}
     if cv2 is None or pil_image is None:
         return result
 
@@ -165,7 +168,7 @@ def detect_colour_card(pil_image):
     photo_px = float(rgb.shape[0] * rgb.shape[1])
 
     # a patch must be at least ~0.02% of the photo (card very far away) to be measured
-    block, block_area = _find_block(hsv, min_area=max(20, int(photo_px * 0.0002)))
+    block, block_area, hull = _find_block(hsv, min_area=max(20, int(photo_px * 0.0002)))
     if block is None or block_area <= 0:
         return result
 
@@ -179,6 +182,7 @@ def detect_colour_card(pil_image):
         "photo_area_cm2": round(photo_px / (px_per_cm ** 2), 2),
         "white_balance_gains": gains,
         "card_white_rgb": white_rgb,
+        "block_polygon": [[round(float(x) / rgb.shape[1], 5), round(float(y) / rgb.shape[0], 5)] for x, y in hull],
     })
     return result
 

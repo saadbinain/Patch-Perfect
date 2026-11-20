@@ -131,6 +131,76 @@ def _filled_area_ratio(mask):
     return float(filled.sum()) / float(mask.size)
 
 
+# The whole printed card lies within this many block-widths of the block's centre
+# (block = 2 patches; grid edge ~1 block-width away, white margin ~0.75 more).
+CARD_EXCLUSION_SCALE = 4.0
+
+
+def _card_exclusion_mask(card, w, h):
+    """uint8 HxW mask of the colour card (its patches can look like wound tissue), or None."""
+    poly = card.get("block_polygon") if card else None
+    if not poly:
+        return None
+    pts = np.array([[x * w, y * h] for x, y in poly], dtype=np.float32)
+    centre = pts.mean(axis=0)
+    zone = (centre + (pts - centre) * CARD_EXCLUSION_SCALE).round().astype(np.int32)
+    mask = np.zeros((h, w), np.uint8)
+    cv2.fillConvexPoly(mask, zone, 1)
+    return mask
+
+
+def _select_wound_regions(mask):
+    """
+    Keeps the wound and drops look-alikes the segmenter also fires on (hair bands,
+    red skin at the photo edge, background). The wound is the region with the best
+    size x solidity (a filled blob, not a ragged strip) that does not run off the
+    photo edge; nearby fragments of it are kept too, since wounds can be patchy.
+    Returns the selected mask, or the input mask if no region qualifies.
+    """
+    if mask is None or not mask.any():
+        return mask
+    h, w = mask.shape
+    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+    min_area = max(30, int(0.0015 * h * w))
+    regions = []
+    for i in range(1, n):
+        x, y, bw, bh, area = stats[i]
+        if area < min_area:
+            continue
+        contours, _ = cv2.findContours((labels == i).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        hull_area = cv2.contourArea(cv2.convexHull(max(contours, key=cv2.contourArea)))
+        solidity = min(1.0, area / max(hull_area, 1.0))
+        touches_edge = x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1
+        score = area * solidity ** 2 * (0.25 if touches_edge else 1.0)
+        regions.append({"label": i, "box": (x, y, x + bw, y + bh), "area": area, "edge": touches_edge, "score": score})
+    if not regions:
+        return mask
+
+    main = max(regions, key=lambda r: r["score"])
+    x1, y1, x2, y2 = main["box"]
+    mx, my = 0.3 * (x2 - x1), 0.3 * (y2 - y1)
+    near = (x1 - mx, y1 - my, x2 + mx, y2 + my)
+    keep = np.zeros_like(mask)
+    for r in regions:
+        bx1, by1, bx2, by2 = r["box"]
+        overlaps = bx1 < near[2] and bx2 > near[0] and by1 < near[3] and by2 > near[1]
+        if r is main or (overlaps and not r["edge"] and r["area"] >= 0.05 * main["area"]):
+            keep[labels == r["label"]] = 1
+    # give back the edge detail the opening shaved off, without re-attaching distant strands
+    return mask & cv2.dilate(keep, np.ones((9, 9), np.uint8))
+
+
+def _bbox_of(mask, pad=0.1):
+    ys, xs = np.nonzero(mask)
+    if xs.size == 0:
+        return None
+    h, w = mask.shape
+    x1, y1, x2, y2 = int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+    px, py = int((x2 - x1) * pad), int((y2 - y1) * pad)
+    return (max(0, x1 - px), max(0, y1 - py), min(w, x2 + px), min(h, y2 + py))
+
+
 def _card_summary(card):
     """The part of the colour-card result that is returned to the app."""
     return {
@@ -248,8 +318,12 @@ class AIPipelineManager:
         }
 
     # ------------------------------------------------------------------ stages
-    def _segment(self, pil_image):
-        """Returns (mask uint8 HxW or None, bbox, wound_area_ratio)."""
+    def _segment(self, pil_image, exclude=None):
+        """
+        Returns (mask uint8 HxW or None, bbox, wound_area_ratio).
+        mask is everything the segmenter found (minus `exclude`, e.g. the colour card);
+        bbox is around the selected wound regions only (see _select_wound_regions).
+        """
         if self.fusegnet_model is None:
             return None, None, None
 
@@ -266,15 +340,13 @@ class AIPipelineManager:
             prob = torch.sigmoid(output[:, 0:1]).cpu().numpy()[0, 0]
 
         mask = cv2.resize((prob > SEG_THRESHOLD).astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
+        if exclude is not None:
+            mask[exclude > 0] = 0
         area_ratio = float(mask.mean())
         if area_ratio < MIN_WOUND_AREA_RATIO:
             return None, None, area_ratio
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        x, y, bw, bh = cv2.boundingRect(max(contours, key=cv2.contourArea))
-        pad_x, pad_y = int(bw * 0.1), int(bh * 0.1)
-        bbox = (max(0, x - pad_x), max(0, y - pad_y), min(w, x + bw + pad_x), min(h, y + bh + pad_y))
-        return mask, bbox, area_ratio
+        return mask, _bbox_of(_select_wound_regions(mask)), area_ratio
 
     def _classify(self, crop):
         if self.vgg_classifier is None:
@@ -413,8 +485,8 @@ class AIPipelineManager:
         pil_img = preprocessed["pil_image"]
         img_w, img_h = pil_img.size
 
-        mask, bbox, area_ratio = self._segment(pil_img)
         card = detect_colour_card(pil_input)
+        mask, bbox, area_ratio = self._segment(pil_img, exclude=_card_exclusion_mask(card, img_w, img_h))
         if bbox is None:
             # Default to centered 70% frame if no wound outline was detected
             pad_w = int(img_w * 0.15)
@@ -474,7 +546,7 @@ class AIPipelineManager:
         similarity_data = self._check_similarity(pil_img, wound_profile, baseline_image_input, warnings)
 
         # Stage 2: segmentation
-        mask, auto_bbox, raw_area_ratio = self._segment(pil_img)
+        mask, auto_bbox, raw_area_ratio = self._segment(pil_img, exclude=_card_exclusion_mask(card, img_w, img_h))
         if self.fusegnet_model is None:
             warnings.append("Wound segmentation model is not loaded; tissue was analysed on the whole photo.")
         elif mask is None:
@@ -492,7 +564,8 @@ class AIPipelineManager:
                 filtered_mask[cy1:cy2, cx1:cx2] = mask[cy1:cy2, cx1:cx2]
                 if not filtered_mask.any():
                     raise ValueError("The box does not contain the wound. Widen the box so the whole wound edge is inside it.")
-                mask = filtered_mask
+                # pick the wound within the clinician's box (they may have boxed a second wound)
+                mask = _select_wound_regions(filtered_mask)
                 # Size stays a share of the FULL photo, never of the crop: a tighter box
                 # must not make the wound look bigger (false "Deteriorating").
                 area_ratio = _filled_area_ratio(mask)
@@ -500,6 +573,9 @@ class AIPipelineManager:
                 area_ratio = None
         else:
             active_bbox = auto_bbox
+            if mask is not None:
+                mask = _select_wound_regions(mask)
+                active_bbox = _bbox_of(mask) or auto_bbox
             area_ratio = _filled_area_ratio(mask) if mask is not None else raw_area_ratio
 
         if active_bbox:
