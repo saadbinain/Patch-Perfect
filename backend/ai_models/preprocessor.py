@@ -8,6 +8,7 @@ Implements Phase 2: Data Preprocessing (MLDLC) from Chapter III:
 
 import io
 import base64
+import binascii
 from PIL import Image, ImageOps
 
 TARGET_IMAGE_SIZE = (512, 512)
@@ -23,10 +24,21 @@ def _upright_rgb(img):
         pass
     return img.convert("RGB")
 
+UNREADABLE_PHOTO = "This file is not a readable photo. Take or choose a JPEG or PNG photo of the wound."
+
+
+def _open(image_bytes):
+    try:
+        return _upright_rgb(Image.open(io.BytesIO(image_bytes)))
+    except (OSError, ValueError, Image.DecompressionBombError) as e:
+        raise ValueError(UNREADABLE_PHOTO) from e
+
+
 def load_image_from_input(image_input):
     """
     Accepts a base64 string, file-like object, or PIL image,
     and returns a clean PIL Image in RGB format.
+    Raises ValueError (with a message for the user) if the data is not a readable image.
     """
     if image_input is None:
         return None
@@ -39,15 +51,18 @@ def load_image_from_input(image_input):
         if "," in image_input:
             # Strip data URL prefix (e.g. data:image/png;base64,...)
             image_input = image_input.split(",")[1]
-        image_bytes = base64.b64decode(image_input)
-        return _upright_rgb(Image.open(io.BytesIO(image_bytes)))
+        try:
+            image_bytes = base64.b64decode(image_input)
+        except (binascii.Error, ValueError) as e:
+            raise ValueError(UNREADABLE_PHOTO) from e
+        return _open(image_bytes)
 
     # If uploaded file / BytesIO
     if hasattr(image_input, "read"):
         content = image_input.read()
         if hasattr(image_input, "seek"):
             image_input.seek(0)
-        return _upright_rgb(Image.open(io.BytesIO(content)))
+        return _open(content)
 
     return None
 

@@ -94,7 +94,9 @@ def _parse_crop_box(crop_box, img_w, img_h):
             return None
 
         vals = [float(x1), float(y1), float(x2), float(y2)]
-        if all(0.0 <= v <= 1.0 for v in vals) and (vals[2] <= 1.0 and vals[3] <= 1.0):
+        if all(-0.5 <= v <= 1.5 for v in vals):
+            # normalised 0..1 (what the app sends); slight overshoot from dragging is clamped
+            vals = [min(1.0, max(0.0, v)) for v in vals]
             px1 = int(round(vals[0] * img_w))
             py1 = int(round(vals[1] * img_h))
             px2 = int(round(vals[2] * img_w))
@@ -142,6 +144,57 @@ def _wound_bed(mask):
     return bed | mask
 
 
+# Peeling a dark red rim off the outline (see _wound_outline): only when the outline
+# splits clearly into a bright part and a darker part that lies on its outside.
+RIM_MIN_BRIGHTNESS_GAP = 35   # mean value (0-255), bright part minus dark part
+RIM_MIN_SHARE = 0.15          # the dark part is at least this share of the outline
+RIM_MAX_DEPTH_RATIO = 0.75    # dark pixels sit at most this deep (vs bright ones) from the edge
+RIM_MIN_KEPT = 0.3            # never peel away more than 70% of the outline
+# Inflamed skin around wounds measured 106-127; a darker part of the wound bed itself
+# (e.g. the purplish side of an ulcer) measured ~149, so only a genuinely dark rim is peeled.
+RIM_MAX_DARK_MEAN = 135
+
+
+def _brightness(pil_image):
+    return cv2.cvtColor(np.asarray(pil_image.convert("RGB")), cv2.COLOR_RGB2HSV)[..., 2]
+
+
+def _wound_outline(selected, brightness):
+    """
+    The final wound outline from the selected regions.
+
+    The segmenter often takes in the red, inflamed skin around a wound together with
+    the wound itself (measured: periwound brightness ~105 vs wound bed ~155). When the
+    outline splits clearly into a bright core and a darker ring on its OUTSIDE, the ring
+    is peeled off and the core is closed and filled again, so dark tissue inside the
+    wound (eschar, dusky granulation) is kept. Otherwise the outline is just filled.
+    """
+    if selected is None or not selected.any():
+        return selected
+    bed = _wound_bed(selected)
+    inside = selected > 0
+    values = brightness[inside].astype(np.uint8).reshape(-1, 1)
+    threshold, _ = cv2.threshold(values, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    # Otsu: values above the threshold are the bright class
+    dark = inside & (brightness <= threshold)
+    bright = inside & (brightness > threshold)
+    if not dark.any() or not bright.any():
+        return bed
+    depth = cv2.distanceTransform(selected.astype(np.uint8), cv2.DIST_L2, 5)
+    gap = float(brightness[bright].mean() - brightness[dark].mean())
+    share = float(dark.sum()) / float(inside.sum())
+    depth_ratio = float(np.median(depth[dark])) / max(float(np.median(depth[bright])), 1e-3)
+    dark_mean = float(brightness[dark].mean())
+    if (gap < RIM_MIN_BRIGHTNESS_GAP or share < RIM_MIN_SHARE or depth_ratio > RIM_MAX_DEPTH_RATIO
+            or dark_mean > RIM_MAX_DARK_MEAN):
+        return bed
+    core = cv2.morphologyEx(bright.astype(np.uint8), cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
+    peeled = _wound_bed(_select_wound_regions(core)) & bed
+    if peeled is None or peeled.sum() < RIM_MIN_KEPT * inside.sum():
+        return bed
+    return peeled
+
+
 def _filled_area_ratio(mask):
     """Wound size as a share of the photo, measured on the whole wound bed."""
     if mask is None or not mask.any():
@@ -167,31 +220,71 @@ def _card_exclusion_mask(card, w, h):
     return mask
 
 
-def _select_wound_regions(mask):
+# Region picking (see _select_wound_regions)
+REGION_MIN_SHARE = 0.0015        # normal regions: at least this share of the photo
+SMALL_REGION_MIN_SHARE = 0.0004  # small, sharply outlined sores (e.g. 0.2 cm2 on a nose)
+CONTRAST_SCALE = 40.0            # saturation units per "1x" of contrast vs the photo's skin
+VERY_DARK = 50                   # brightness below this: shadow, nostril, hair
+
+
+def _region_candidates(mask):
+    """Candidate regions at two scales: a strong clean-up, which separates the wound
+    from hair bands joined to it by thin strands, and a light one, which keeps
+    small sores that the strong clean-up would erase."""
+    h, w = mask.shape
+    out = []
+    for kernel, min_share in ((7, REGION_MIN_SHARE), (3, SMALL_REGION_MIN_SHARE)):
+        opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel, kernel)))
+        n, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
+        for i in range(1, n):
+            x, y, bw, bh, area = stats[i]
+            if area >= max(20, int(min_share * h * w)):
+                out.append(((labels == i), (x, y, x + bw, y + bh), int(area)))
+    return out
+
+
+def _select_wound_regions(mask, image=None):
     """
     Keeps the wound and drops look-alikes the segmenter also fires on (hair bands,
-    red skin at the photo edge, background). The wound is the region with the best
-    size x solidity (a filled blob, not a ragged strip) that does not run off the
-    photo edge; nearby fragments of it are kept too, since wounds can be patchy.
+    moustache, nostrils, red skin at the photo edge, background).
+
+    Each candidate region is scored by size x solidity^2 (a filled blob, not a ragged
+    strip), down-weighted if it runs off the photo edge. With the photo (`image`, PIL),
+    it is also scored by colour: how much more saturated it is than the photo's typical
+    skin (a sore stands out; moustache and normal skin do not), and down-weighted when
+    it is mostly very dark (shadow, nostril, hair) or not red (logos, text, objects).
+    Nearby fragments of the chosen wound
+    are kept too, since wounds can be patchy.
     Returns the selected mask, or the input mask if no region qualifies.
     """
     if mask is None or not mask.any():
         return mask
+    mask = mask.astype(np.uint8)
     h, w = mask.shape
-    opened = cv2.morphologyEx(mask, cv2.MORPH_OPEN, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7)))
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(opened, connectivity=8)
-    min_area = max(30, int(0.0015 * h * w))
+    sat = val = None
+    if image is not None:
+        hsv = cv2.cvtColor(np.asarray(image.convert("RGB")), cv2.COLOR_RGB2HSV)
+        sat, val = hsv[..., 1].astype(np.float32), hsv[..., 2]
+        red_hue = (hsv[..., 0] <= 10) | (hsv[..., 0] >= 165)
+        photo_sat = float(np.median(sat))
+
     regions = []
-    for i in range(1, n):
-        x, y, bw, bh, area = stats[i]
-        if area < min_area:
-            continue
-        contours, _ = cv2.findContours((labels == i).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for region, (x1, y1, x2, y2), area in _region_candidates(mask):
+        contours, _ = cv2.findContours(region.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         hull_area = cv2.contourArea(cv2.convexHull(max(contours, key=cv2.contourArea)))
         solidity = min(1.0, area / max(hull_area, 1.0))
-        touches_edge = x <= 1 or y <= 1 or x + bw >= w - 1 or y + bh >= h - 1
+        touches_edge = x1 <= 1 or y1 <= 1 or x2 >= w - 1 or y2 >= h - 1
         score = area * solidity ** 2 * (0.25 if touches_edge else 1.0)
-        regions.append({"label": i, "box": (x, y, x + bw, y + bh), "area": area, "edge": touches_edge, "score": score})
+        if sat is not None:
+            contrast = float(np.clip((sat[region].mean() - photo_sat) / CONTRAST_SCALE, 0.3, 4.0))
+            # dark regions (hair, shadow, nostril) fade out smoothly: mean brightness
+            # 50 -> 0.15x, 130+ -> 1x (a pale healing wound measured ~189, hair ~67)
+            brightness = float(np.clip((float(val[region].mean()) - VERY_DARK) / 80.0, 0.15, 1.0))
+            # wounds are mostly red; text, logos and objects usually are not (yellow slough
+            # still scores 0.25x, so a sloughy wound is down-weighted, not ruled out)
+            redness = 0.25 + 0.75 * float(red_hue[region].mean())
+            score *= contrast ** 2 * redness * brightness
+        regions.append({"mask": region, "box": (x1, y1, x2, y2), "area": area, "edge": touches_edge, "score": score})
     if not regions:
         return mask
 
@@ -199,14 +292,17 @@ def _select_wound_regions(mask):
     x1, y1, x2, y2 = main["box"]
     mx, my = 0.3 * (x2 - x1), 0.3 * (y2 - y1)
     near = (x1 - mx, y1 - my, x2 + mx, y2 + my)
-    keep = np.zeros_like(mask)
+    keep = main["mask"].copy()
     for r in regions:
+        if r is main or (r["mask"] & main["mask"]).any():
+            continue  # the main region itself, or the same region at the other scale
         bx1, by1, bx2, by2 = r["box"]
         overlaps = bx1 < near[2] and bx2 > near[0] and by1 < near[3] and by2 > near[1]
-        if r is main or (overlaps and not r["edge"] and r["area"] >= 0.05 * main["area"]):
-            keep[labels == r["label"]] = 1
-    # give back the edge detail the opening shaved off, without re-attaching distant strands
-    return mask & cv2.dilate(keep, np.ones((9, 9), np.uint8))
+        # pieces of a patchy wound are smaller than its main part
+        if overlaps and not r["edge"] and 0.05 * main["area"] <= r["area"] <= main["area"]:
+            keep |= r["mask"]
+    # give back the edge detail the clean-up shaved off, without re-attaching distant strands
+    return mask & cv2.dilate(keep.astype(np.uint8), np.ones((9, 9), np.uint8))
 
 
 def _bbox_of(mask, pad=0.1):
@@ -243,6 +339,26 @@ def _distance_note(card, previous_scan):
         return round(linear, 2), (f"This photo was taken further away than the last one (card looks {1 / linear:.1f}x smaller). "
                                   "Size is still measured in cm², but matching the distance gives more reliable results.")
     return round(linear, 2), None
+
+
+# Below this, a photo has too few pixels for the outline or the colours to mean anything.
+MIN_PHOTO_SIDE = 128
+# A photo whose average saturation is this low is black and white (or nearly):
+# grey pixels would be graded as black eschar ("Critical").
+MIN_PHOTO_SATURATION = 12
+# The clinician's box must cover at least this share of the photo's width and height.
+MIN_BOX_SIDE = 0.03
+
+
+def _check_photo(pil_input):
+    w, h = pil_input.size
+    if min(w, h) < MIN_PHOTO_SIDE:
+        raise ValueError(f"This photo is too small ({w}x{h} pixels). Use the camera's full-size photo.")
+    small = pil_input.copy()
+    small.thumbnail((256, 256))
+    saturation = float(np.asarray(small.convert("HSV"))[..., 1].mean())
+    if saturation < MIN_PHOTO_SATURATION:
+        raise ValueError("This photo has no colour (black and white?). Tissue can only be graded on a colour photo.")
 
 
 def build_fusegnet():
@@ -364,7 +480,7 @@ class AIPipelineManager:
         if area_ratio < MIN_WOUND_AREA_RATIO:
             return None, None, area_ratio
 
-        return mask, _bbox_of(_select_wound_regions(mask)), area_ratio
+        return mask, _bbox_of(_wound_outline(_select_wound_regions(mask, pil_image), _brightness(pil_image))), area_ratio
 
     def _classify(self, crop):
         if self.vgg_classifier is None:
@@ -497,6 +613,7 @@ class AIPipelineManager:
         pil_input = load_image_from_input(image_input)
         if pil_input is None:
             raise ValueError("A wound photo is required.")
+        _check_photo(pil_input)
 
         self.load_models()
         preprocessed = preprocess_wound_image(pil_input)
@@ -540,6 +657,7 @@ class AIPipelineManager:
         pil_input = load_image_from_input(image_input)
         if pil_input is None:
             raise ValueError("A wound photo is required.")
+        _check_photo(pil_input)
 
         self.load_models()
         preprocessed = preprocess_wound_image(pil_input)
@@ -547,6 +665,9 @@ class AIPipelineManager:
         img_w, img_h = pil_img.size
         warnings = []
         user_crop = _parse_crop_box(crop_box, img_w, img_h)
+        if user_crop and ((user_crop[2] - user_crop[0]) < MIN_BOX_SIDE * img_w
+                          or (user_crop[3] - user_crop[1]) < MIN_BOX_SIDE * img_h):
+            raise ValueError("The box is too small. Drag its corners so the whole wound is inside it.")
 
         baseline_scan = self._baseline_scan(wound_profile)
         previous_scan = wound_profile.scans.order_by('-scan_date', '-id').first() if wound_profile is not None else None
@@ -582,15 +703,16 @@ class AIPipelineManager:
                 filtered_mask[cy1:cy2, cx1:cx2] = mask[cy1:cy2, cx1:cx2]
                 if not filtered_mask.any():
                     raise ValueError("The box does not contain the wound. Widen the box so the whole wound edge is inside it.")
-                # The wound the AI picks on the whole photo, if it lies in the box: accepting
+                # The wound the AI picks on the whole photo, if it lies (mostly) in the box: accepting
                 # the AI's suggested box then gives exactly the AI's own result. Only when
                 # the clinician boxed something else (e.g. a second wound) is the wound
                 # picked again inside the box.
-                selected = _select_wound_regions(mask)
-                if selected[cy1:cy2, cx1:cx2].any():
-                    bed = _wound_bed(selected)
+                selected = _select_wound_regions(mask, pil_img)
+                inside_share = float(selected[cy1:cy2, cx1:cx2].sum()) / max(float(selected.sum()), 1.0)
+                if inside_share >= 0.6:
+                    bed = _wound_outline(selected, _brightness(pil_img))
                 else:
-                    bed = _wound_bed(_select_wound_regions(filtered_mask))
+                    bed = _wound_outline(_select_wound_regions(filtered_mask, pil_img), _brightness(pil_img))
                 mask = np.zeros_like(bed)
                 mask[cy1:cy2, cx1:cx2] = bed[cy1:cy2, cx1:cx2]
                 # Size stays a share of the FULL photo, never of the crop: a tighter box
@@ -601,7 +723,7 @@ class AIPipelineManager:
         else:
             active_bbox = auto_bbox
             if mask is not None:
-                mask = _wound_bed(_select_wound_regions(mask))
+                mask = _wound_outline(_select_wound_regions(mask, pil_img), _brightness(pil_img))
                 active_bbox = _bbox_of(mask) or auto_bbox
             area_ratio = float(mask.sum()) / float(mask.size) if mask is not None else raw_area_ratio
 

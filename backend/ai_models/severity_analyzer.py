@@ -58,14 +58,16 @@ def analyze_tissue_and_severity(image_input, region_mask=None):
     hue, sat, val = hsv[..., 0], hsv[..., 1], hsv[..., 2]
 
     # Tissue colour rules (OpenCV hue 0..179), measured on white-balanced clinic photos:
-    #   granulation  saturated red             hue 0-9 / 165+, sat >= 120  (beds: hue 1-3, sat 145-200)
+    #   granulation  saturated red             hue 0-9 / 165+, sat >= 120  (beds: hue 1-3, sat 145-200),
+    #                or dusky red in shade     sat 50-119 with value < 150 (dull venous ulcer beds)
     #   new skin     pale pink, low saturation hue 0-10 / 160+, sat 20-119, bright
     #   slough       cream / yellow fibrin     hue 10-35, sat >= 45, bright (measured: hue 12-17, sat 85-115)
     #   necrotic     black / very dark eschar  value <= 60 (dark red periwound sits ~85, kept out)
     # Each pixel gets exactly one class, in this order.
     red_hue = (hue <= 9) | (hue >= 165)
     necrotic = val <= 60
-    granulation = ~necrotic & red_hue & (sat >= 120)
+    # bright saturated red, or duller / dusky red in shade (poorly perfused granulation)
+    granulation = ~necrotic & red_hue & ((sat >= 120) | ((sat >= 50) & (val < 150)))
     epithelial = ~necrotic & ~granulation & ((hue <= 10) | (hue >= 160)) & (sat >= 20) & (sat < 120) & (val >= 150)
     slough = ~necrotic & ~granulation & ~epithelial & (hue >= 10) & (hue <= 35) & (sat >= 45) & (val >= 120)
 

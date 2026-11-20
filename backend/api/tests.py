@@ -622,6 +622,12 @@ class TissueRulesTests(unittest.TestCase):
         self.assertEqual(sev["granulation_pct"], 0.0)
         self.assertEqual(sev["severity_level"], "Minimal")
 
+    def test_dusky_red_bed_is_granulation_not_rejected(self):
+        # measured on a dull venous ulcer: hue ~5, sat ~104, value ~129
+        sev = analyze_tissue_and_severity(self.patches((129, 80, 76)))
+        self.assertTrue(sev["tissue_detected"])
+        self.assertEqual(sev["granulation_pct"], 100.0)
+
     def test_dark_red_periwound_is_not_necrotic(self):
         sev = analyze_tissue_and_severity(self.patches((85, 20, 15)))  # value ~85
         self.assertEqual(sev["necrosis_pct"], 0.0)
@@ -680,3 +686,133 @@ class TissueRulesTests(unittest.TestCase):
         result = manager.run_inference(img, wound_profile=profile)
         self.assertGreater(result["pipeline_metrics"]["tissue_stats"]["slough"], 10)
         self.assertNotEqual(result["healing_status"], "Deteriorating")
+
+
+class PhotoInputTests(unittest.TestCase):
+    """Unusable photos and boxes are refused with a message, never graded."""
+
+    def run_photo(self, img, crop_box=None):
+        return CropPipelineTests().manager_with_mask(CropPipelineTests.wound_mask()).run_inference(img, crop_box=crop_box)
+
+    def test_not_an_image_is_refused(self):
+        from ai_models.preprocessor import load_image_from_input
+        for bad in ("data:image/png;base64," + base64.b64encode(b"not an image").decode(), "%%%not-base64%%%"):
+            with self.assertRaisesRegex(ValueError, "not a readable photo"):
+                load_image_from_input(bad)
+
+    def test_tiny_photo_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "too small"):
+            self.run_photo(Image.new("RGB", (8, 8), (190, 30, 40)))
+
+    def test_black_and_white_photo_is_not_graded_critical(self):
+        with self.assertRaisesRegex(ValueError, "no colour"):
+            self.run_photo(CropPipelineTests.wound_photo().convert("L").convert("RGB"))
+
+    def test_zero_size_box_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "box is too small"):
+            self.run_photo(CropPipelineTests.wound_photo(), crop_box=[0.5, 0.5, 0.5, 0.5])
+
+    def test_box_dragged_slightly_past_the_edge_is_clamped(self):
+        result = self.run_photo(CropPipelineTests.wound_photo(), crop_box=[-0.2, -0.2, 1.4, 1.4])
+        self.assertEqual(result["pipeline_metrics"]["segmentation"]["wound_area_ratio"], round(64 * 64 / (512 * 512), 5))
+
+
+class InflamedRimTests(unittest.TestCase):
+    """Scan 82: red, inflamed skin around the wound must not be measured as wound."""
+
+    @staticmethod
+    def disc(r):
+        import cv2
+        m = np.zeros((512, 512), np.uint8)
+        cv2.circle(m, (256, 256), r, 1, -1)
+        return m
+
+    def test_dark_red_ring_outside_the_wound_is_peeled(self):
+        outline = self.disc(150)                     # segmenter: wound + red skin around it
+        brightness = np.full((512, 512), 105, np.uint8)
+        brightness[self.disc(90) > 0] = 160          # bright, moist wound bed in the middle
+        result = pipeline_loader._wound_outline(outline, brightness)
+        self.assertAlmostEqual(result.sum() / (np.pi * 90 ** 2), 1.0, delta=0.08)
+
+    def test_darker_side_of_the_wound_bed_is_not_peeled(self):
+        # foot ulcer: pale centre (~190) with a darker, purplish wound edge (~149)
+        outline = self.disc(150)
+        brightness = np.full((512, 512), 149, np.uint8)
+        brightness[self.disc(90) > 0] = 190
+        result = pipeline_loader._wound_outline(outline, brightness)
+        self.assertEqual(int(result.sum()), int(outline.sum()))
+
+    def test_dark_tissue_inside_the_wound_is_kept(self):
+        outline = self.disc(120)
+        brightness = np.full((512, 512), 170, np.uint8)
+        brightness[self.disc(60) > 0] = 70           # dark eschar in the centre
+        result = pipeline_loader._wound_outline(outline, brightness)
+        self.assertEqual(int(result.sum()), int(outline.sum()))
+
+    def test_evenly_lit_wound_is_unchanged(self):
+        outline = self.disc(120)
+        rng = np.random.default_rng(0)
+        brightness = (150 + rng.integers(-15, 15, (512, 512))).astype(np.uint8)
+        result = pipeline_loader._wound_outline(outline, brightness)
+        self.assertEqual(int(result.sum()), int(outline.sum()))
+
+
+class ColourAwarePickingTests(unittest.TestCase):
+    """Patient 2: a small red sore on the nose must beat the moustache, nostrils and logos."""
+
+    @staticmethod
+    def face():
+        import cv2
+        img = np.full((512, 512, 3), (200, 150, 130), np.uint8)       # skin, moderately saturated
+        mask = np.zeros((512, 512), np.uint8)
+        cv2.circle(img, (250, 270), 12, (200, 30, 30), -1)            # small saturated red sore
+        cv2.circle(mask, (250, 270), 12, 1, -1)
+        img[400:512, 150:450] = (120, 95, 85)                         # moustache: dull, big, at the edge
+        mask[400:512, 150:450] = 1
+        return img, mask
+
+    def test_small_red_sore_beats_big_dull_region(self):
+        img, mask = self.face()
+        selected = pipeline_loader._select_wound_regions(mask, Image.fromarray(img))
+        self.assertTrue(selected[270, 250])
+        self.assertFalse(selected[480, 300])
+
+    def test_orange_logo_does_not_beat_a_red_wound(self):
+        import cv2
+        img, mask = self.face()
+        img[300:315, 440:460] = (240, 140, 20)                        # small saturated orange logo
+        mask[300:315, 440:460] = 1
+        selected = pipeline_loader._select_wound_regions(mask, Image.fromarray(img))
+        self.assertTrue(selected[270, 250])
+        self.assertFalse(selected[307, 450])
+
+    def test_large_neighbour_is_not_kept_as_a_wound_fragment(self):
+        import cv2
+        img, mask = self.face()
+        cv2.ellipse(img, (290, 300), (30, 18), 0, 0, 360, (60, 40, 40), -1)   # nostril next to the sore
+        cv2.ellipse(mask, (290, 300), (30, 18), 0, 0, 360, 1, -1)
+        selected = pipeline_loader._select_wound_regions(mask, Image.fromarray(img))
+        self.assertTrue(selected[270, 250])
+        self.assertFalse(selected[300, 300])
+
+    def test_box_around_the_sore_reselects_inside_it(self):
+        img, mask = self.face()
+        img[200:330, 300:420] = (190, 40, 40)          # a bigger red patch the AI prefers
+        mask[200:330, 300:420] = 1
+        manager = CropPipelineTests().manager_with_mask(mask)
+        photo = Image.fromarray(img)
+        # the clinician's box covers the sore and only a sliver of the bigger patch
+        r = manager.run_inference(photo, crop_box=[220 / 512, 240 / 512, 310 / 512, 300 / 512])
+        self.assertLess(r["pipeline_metrics"]["segmentation"]["wound_area_ratio"], 0.01)
+
+    def test_pale_healing_wound_beats_dark_hair_at_the_edge(self):
+        # patient 1, 27 Nov 2013: pale healing wound (brightness ~189) vs hair strip (~67)
+        img = np.full((512, 512, 3), (200, 150, 130), np.uint8)
+        mask = np.zeros((512, 512), np.uint8)
+        img[270:390, 220:390] = (235, 190, 180)   # pale pink, less saturated than the skin
+        mask[270:390, 220:390] = 1
+        img[0:60, 30:115] = (70, 35, 25)          # dark reddish hair at the photo edge
+        mask[0:60, 30:115] = 1
+        selected = pipeline_loader._select_wound_regions(mask, Image.fromarray(img))
+        self.assertTrue(selected[330, 300])
+        self.assertFalse(selected[30, 70])

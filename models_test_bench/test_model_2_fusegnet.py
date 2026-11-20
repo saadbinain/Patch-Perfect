@@ -1,7 +1,8 @@
 """
 MODEL 2: FUSegNet wound outline, exactly as the app finds it:
 colour card removed from the outline -> wound region picked (hair / edge strips dropped)
--> gaps closed and filled (slough inside the wound counts) -> AI box.
+-> dark red rim of inflamed skin peeled off -> gaps closed and filled (slough inside
+the wound counts) -> AI box.
 
 Usage:  python test_model_2_fusegnet.py [photo.jpg]
 Saves output_segmentation_overlay.png (outline green, AI box yellow, card zone blue)
@@ -46,7 +47,7 @@ def main():
     if raw is None:
         print(f"\n  No wound found (only {raw_ratio:.2%} of the photo above threshold).")
         return 0
-    bed = pl._wound_bed(pl._select_wound_regions(raw))
+    bed = pl._wound_outline(pl._select_wound_regions(raw, img), pl._brightness(img))
     bed_ratio = float(bed.mean())
 
     print("\n--- Results ---")

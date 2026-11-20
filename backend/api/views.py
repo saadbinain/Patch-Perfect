@@ -267,8 +267,6 @@ class DetectWoundBoxAPIView(APIView):
             return Response(res, status=status.HTTP_200_OK)
         except ValueError as e:
             return Response({"detail": str(e)}, status=status.HTTP_422_UNPROCESSABLE_ENTITY)
-        except Exception as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class AnalyzeWoundAPIView(APIView):
