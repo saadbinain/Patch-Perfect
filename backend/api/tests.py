@@ -536,7 +536,7 @@ class ColourCardTests(unittest.TestCase):
         self.assertAlmostEqual(close, 12.0, delta=1.0)
 
     def test_close_up_is_not_deteriorating_when_compared_in_cm2(self):
-        baseline = mock.Mock(wound_area_cm2=12.0, wound_area_ratio=0.02, severity_score=None,
+        baseline = mock.Mock(wound_area_cm2=12.0, wound_area_ratio=0.02, severity_score=None, epithelial_percent=None,
                              card_block_ratio=(2 * 40) ** 2 / (900 * 700))
         result = self.run_scene(70, previous=baseline)
         self.assertEqual(result["pipeline_metrics"]["size_basis"], "cm2")
@@ -567,6 +567,16 @@ class WoundRegionSelectionTests(unittest.TestCase):
         self.assertTrue(selected[230, 256])
         self.assertFalse(selected[500, 100])
 
+    def test_accepting_the_ai_box_gives_the_ai_result(self):
+        mask = self.blob(np.zeros((512, 512), np.uint8), 256, 300, 80)
+        mask[440:512, 0:512] = 1      # hair band along the bottom edge...
+        mask[400:440, 180:200] = 1    # ...with a strand reaching up towards the wound
+        manager = CropPipelineTests().manager_with_mask(mask)
+        auto = manager.run_inference(CropPipelineTests.wound_photo())["pipeline_metrics"]["segmentation"]
+        x1, y1, x2, y2 = auto["bounding_box"]
+        boxed = manager.run_inference(CropPipelineTests.wound_photo(), crop_box=[x1 / 512, y1 / 512, x2 / 512, y2 / 512])
+        self.assertEqual(boxed["pipeline_metrics"]["segmentation"]["wound_area_ratio"], auto["wound_area_ratio"])
+
     def test_nearby_fragments_of_a_patchy_wound_are_kept(self):
         mask = self.blob(np.zeros((512, 512), np.uint8), 256, 256, 50)
         self.blob(mask, 330, 270, 18)  # second patch of the same wound
@@ -587,3 +597,86 @@ class WoundRegionSelectionTests(unittest.TestCase):
         self.assertGreater(x1, 200 * sx)
         self.assertGreater(y1, 200 * sy)
         self.assertAlmostEqual(result["pipeline_metrics"]["segmentation"]["wound_area_cm2"], 12.0, delta=1.0)
+
+
+class TissueRulesTests(unittest.TestCase):
+    """Step 4: colour rules measured on clinic photos, new skin class, size-aware severity."""
+
+    @staticmethod
+    def patches(*colours):
+        # one 40x40 patch per (r, g, b) colour, side by side
+        img = Image.new("RGB", (40 * len(colours), 40))
+        for i, c in enumerate(colours):
+            img.paste(c, (40 * i, 0, 40 * (i + 1), 40))
+        return img
+
+    def test_cream_slough_is_counted(self):
+        # measured slough on the Day 1 scalp photo: hue ~15 (OpenCV), sat ~100, value ~207
+        sev = analyze_tissue_and_severity(self.patches((207, 166, 126), (191, 30, 20)))
+        self.assertAlmostEqual(sev["slough_pct"], 50, delta=3)
+        self.assertAlmostEqual(sev["granulation_pct"], 50, delta=3)
+
+    def test_pale_pink_new_skin_is_its_own_class(self):
+        sev = analyze_tissue_and_severity(self.patches((215, 170, 165)))
+        self.assertEqual(sev["epithelial_pct"], 100.0)
+        self.assertEqual(sev["granulation_pct"], 0.0)
+        self.assertEqual(sev["severity_level"], "Minimal")
+
+    def test_dark_red_periwound_is_not_necrotic(self):
+        sev = analyze_tissue_and_severity(self.patches((85, 20, 15)))  # value ~85
+        self.assertEqual(sev["necrosis_pct"], 0.0)
+
+    def test_black_eschar_is_necrotic(self):
+        sev = analyze_tissue_and_severity(self.patches((25, 20, 18)))
+        self.assertEqual(sev["necrosis_pct"], 100.0)
+        self.assertEqual(sev["severity_score"], 5)
+
+    def test_large_clean_wound_is_at_least_moderate(self):
+        from ai_models.severity_analyzer import apply_wound_size
+        sev = analyze_tissue_and_severity(self.patches((191, 30, 20)))
+        self.assertEqual(sev["severity_level"], "Mild")
+        self.assertEqual(apply_wound_size(sev, 90.0)["severity_level"], "Moderate")
+        self.assertTrue(apply_wound_size(sev, 90.0)["size_adjusted"])
+        self.assertEqual(apply_wound_size(sev, 4.0)["severity_level"], "Mild")
+        self.assertEqual(apply_wound_size(sev, None)["severity_level"], "Mild")
+
+    def test_new_necrosis_is_deteriorating_even_if_smaller(self):
+        status = evaluate_healing_status(
+            current_area=8.0, baseline_area=12.0, current_severity_score=4, baseline_severity_score=2,
+            current_tissue={"granulation": 70, "slough": 5, "necrotic": 25, "epithelial": 0},
+            baseline_tissue={"granulation": 95, "slough": 0, "necrotic": 0, "epithelial": 5})
+        self.assertEqual(status, "Deteriorating")
+
+    def test_slough_clearing_at_same_size_is_improving(self):
+        status = evaluate_healing_status(
+            current_area=12.0, baseline_area=12.2, current_severity_score=2, baseline_severity_score=3,
+            current_tissue={"granulation": 95, "slough": 2, "necrotic": 0, "epithelial": 3},
+            baseline_tissue={"granulation": 50, "slough": 31, "necrotic": 0, "epithelial": 19})
+        self.assertEqual(status, "Improving")
+
+    def test_wound_bed_closes_an_outline_open_to_one_side(self):
+        # ring of granulation with the slough centre left out and open at the bottom
+        mask = np.zeros((200, 200), np.uint8)
+        import cv2
+        cv2.circle(mask, (100, 100), 60, 1, -1)
+        cv2.circle(mask, (100, 100), 35, 0, -1)
+        mask[100:200, 94:106] = 0  # 12 px bay out to the edge of the outline
+        bed = pipeline_loader._wound_bed(mask)
+        self.assertTrue(bed[100, 100])
+        self.assertGreater(bed.sum(), 0.95 * np.pi * 60 ** 2)
+
+    def test_old_baseline_without_new_skin_value_is_not_tissue_compared(self):
+        mask = CropPipelineTests.wound_mask()
+        manager = CropPipelineTests().manager_with_mask(mask)
+        old = mock.Mock(wound_area_cm2=None, wound_area_ratio=64 * 64 / (512 * 512), severity_score=2,
+                        granulation_percent=100.0, slough_percent=0.0, necrotic_percent=0.0, epithelial_percent=None,
+                        card_block_ratio=None)
+        manager._baseline_scan = lambda wp: old
+        manager._check_similarity = lambda *a, **k: {"is_baseline": False}
+        profile = mock.Mock()
+        profile.scans.order_by.return_value.first.return_value = old
+        img = CropPipelineTests.wound_photo()
+        img.paste((207, 166, 126), (240, 240, 272, 272))  # slough appears in the centre
+        result = manager.run_inference(img, wound_profile=profile)
+        self.assertGreater(result["pipeline_metrics"]["tissue_stats"]["slough"], 10)
+        self.assertNotEqual(result["healing_status"], "Deteriorating")

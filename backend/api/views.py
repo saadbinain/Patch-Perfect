@@ -393,6 +393,7 @@ class WoundAssessmentScanViewSet(viewsets.ModelViewSet):
                 granulation_percent=pct('granulation', 0.0),
                 slough_percent=pct('slough', 0.0),
                 necrotic_percent=pct('necrotic', 0.0),
+                epithelial_percent=pct('epithelial', None) if tissue_stats.get('epithelial') is not None else None,
                 wound_area_ratio=area,
                 wound_area_cm2=area_cm2,
                 card_block_ratio=card_block_ratio,

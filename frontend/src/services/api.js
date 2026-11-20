@@ -88,6 +88,8 @@ export const extractTissueStats = (scanResult) => {
     granulation: pick(src.granulation, legacy.granulationPercent, ta.granulationPercent, pr.granulation) ?? 0,
     slough: pick(src.slough, legacy.sloughPercent, ta.sloughPercent, pr.slough) ?? 0,
     necrotic: pick(src.necrotic, legacy.necroticPercent, ta.necroticPercent, pr.necrotic) ?? 0,
+    // new skin / scar; null on scans graded before this class existed
+    epithelial: pick(src.epithelial, pr.epithelial) ?? null,
   };
 };
 
@@ -349,6 +351,7 @@ export const api = {
         tissueMethod: metrics.tissue_method,
         colourCard: metrics.colour_card,
         sizeBasis: metrics.size_basis,
+        severitySizeAdjusted: Boolean(metrics.severity_size_adjusted),
       },
     };
   },

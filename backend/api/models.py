@@ -87,6 +87,8 @@ class WoundAssessmentScan(models.Model):
     granulation_percent = models.FloatField(default=50.0)
     slough_percent = models.FloatField(default=35.0)
     necrotic_percent = models.FloatField(default=15.0)
+    # New skin / scar (pale pink). Null on scans graded before this class existed.
+    epithelial_percent = models.FloatField(null=True, blank=True)
     # Fraction of the photo covered by the FUSegNet wound mask; used for healing trend vs Day 1
     wound_area_ratio = models.FloatField(null=True, blank=True)
     # Real wound size, scaled with the colour card; used for the healing trend when available

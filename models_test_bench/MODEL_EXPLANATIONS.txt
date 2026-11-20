@@ -1,0 +1,171 @@
+================================================================================
+                      PATCH PERFECT AI - MODEL SPECIFICATIONS
+                     Architecture, Inference & Training Guide
+================================================================================
+
+PIPELINE OVERVIEW
+-----------------
+                               [ Input Wound Image ]
+                                         |
+             +---------------------------+---------------------------+
+             |                                                       |
+             v                                                       v
+    [Model 1: ResNet-50]                                    [Model 2: FUSegNet]
+    Wound Similarity & Verification                         Wound Boundary Segmentation
+      | (Cosine Similarity >= 0.65)                           | (Binary Mask & Bounding Box)
+      v                                                       v
+    Verified Same Wound?                                    Cropped Wound Bed
+                                                              |
+             +------------------------------------------------+----------------------------+
+             |                                                                             |
+             v                                                                             v
+    [Model 3: VGG16]                                                       [Model 4: Severity & Healing]
+    Etiology Classification                                                Tissue Colorimetry & Score (1-5)
+    (Diabetic, Pressure, Surgical, Venous)                                 (Granulation / Slough / Necrosis)
+
+
+================================================================================
+1. MODEL 1: ResNet-50 (Wound Similarity & Patient Verification)
+================================================================================
+
+PRIMARY PURPOSE:
+When a patient uploads follow-up wound photos across longitudinal visits, the system
+must verify that the new image belongs to the same wound and anatomical body site
+before computing healing progression.
+
+HOW IT WORKS (INFERENCE):
+1. Backbone Architecture:
+   - Uses a 50-layer deep Residual Convolutional Neural Network (ResNet-50).
+2. Feature Extraction:
+   - The final 1,000-class classification head is removed.
+   - The network terminates at the Global Average Pooling layer, converting the
+     input image into a dense 2,048-dimensional feature embedding vector (v).
+3. L2 Normalization:
+   - Both baseline and follow-up feature vectors are normalized to unit length:
+       v_hat = v / ||v||_2
+4. Cosine Similarity Calculation:
+   - The mathematical dot product determines the cosine of the angle between vectors:
+       Cosine Similarity = v1_hat . v2_hat
+5. Decision Threshold:
+   - >= 0.65 (65.0%): MATCH CONFIRMED (Same patient wound site).
+   - <  0.65: MISMATCH DETECTED (Different body part, different patient, or corrupted capture).
+
+HOW IT WAS TRAINED:
+- Dataset: Pre-trained on ImageNet-1k (1.28 million natural images across 1,000 categories).
+  This allows the convolutional layers to learn low-level primitives (edges, textures,
+  gradients) up to complex anatomical structures.
+- Residual Learning: Uses identity skip-connections [F(x) + x] that allow gradients to
+  propagate back through 50 layers without vanishing.
+- Loss Function & Training: Trained with Cross-Entropy Loss on ImageNet, then deployed as
+  a frozen deep feature extractor backbone for zero-shot clinical feature comparison.
+
+
+================================================================================
+2. MODEL 2: FUSegNet (Wound Boundary Segmentation)
+================================================================================
+
+PRIMARY PURPOSE:
+Accurately detects and segments the exact boundary and surface area of the wound
+from surrounding healthy skin, clothing, and background.
+
+HOW IT WORKS (INFERENCE):
+1. Encoder-Decoder Architecture (SimpleFUSegNet):
+   - Encoder (Downsampling): 4 sequential blocks of dual 3x3 Conv2d, Batch Normalization,
+     and ReLU activations with 2x2 Max Pooling (channels increase: 64 -> 128 -> 256 -> 512).
+   - Decoder (Upsampling): Bilinear interpolation upsamplers paired with skip connections
+     concatenated from the corresponding encoder layers to recover fine spatial edge details.
+2. Continuous Probability Map:
+   - A 1x1 convolution with a Sigmoid activation produces a single-channel continuous heatmap
+     where each pixel represents a probability in [0.0, 1.0] of being wound tissue.
+3. Adaptive Binarization:
+   - Applies Otsu's Global Automatic Thresholding to compute an image-specific cutoff threshold.
+4. Outputs:
+   - Binary segmentation mask saved to 'output_segmentation_mask.png'.
+   - Total wound pixel surface area.
+   - Spatial bounding box [x1, y1, x2, y2] delimiting the wound bed.
+
+HOW IT WAS TRAINED:
+- Dataset: Trained on annotated chronic wound and foot ulcer datasets (such as FUSeg / Medetec)
+  with expert pixel-level ground truth masks.
+- Epochs: Checkpoint 'fusegnet_segmentation.pth' was trained for 182 epochs.
+- Loss Function: Combined Binary Cross-Entropy (BCE) and Dice Loss:
+    L_total = L_BCE + L_Dice
+    where L_Dice = 1 - (2 * |Y_true n Y_pred| + eps) / (|Y_true| + |Y_pred| + eps)
+  The Dice loss prevents bias toward background pixels in images with small wounds.
+- Optimizer: Adam optimizer with weight decay, learning rate scheduling (ReduceLROnPlateau).
+- Augmentations: Random rotations (+-15 deg), horizontal/vertical flips, zoom, and brightness jitter.
+
+
+================================================================================
+3. MODEL 3: VGG16 (Wound Type Classification)
+================================================================================
+
+PRIMARY PURPOSE:
+Classifies the etiology of the wound into one of 4 primary clinical categories
+to guide appropriate treatment, dressing selection, and care protocols.
+
+HOW IT WORKS (INFERENCE):
+1. Architecture:
+   - 16-layer Deep Convolutional Network (VGG16) with 5 convolutional blocks of 3x3 filters.
+2. Custom Classifier Head:
+   - The original Dense layers were replaced with:
+       Linear(25088 -> 256) -> ReLU -> Dropout(p=0.3) -> Linear(256 -> 4)
+3. Softmax Distribution:
+   - Converts raw logits into probability distribution across 4 clinical wound classes:
+       1. Diabetic Ulcer (neuropathic foot ulcers, punched-out margins)
+       2. Pressure Injury (bedsores over bony prominences)
+       3. Surgical Wound (incisions, dehiscence, surgical staples/sutures)
+       4. Venous Ulcer (irregular edges, gaiter region, exudative)
+4. Prediction:
+   - Predicts the class with highest probability (argmax) along with confidence percentage.
+
+HOW IT WAS TRAINED:
+- Transfer Learning: Backbone weights initialized with ImageNet pre-training.
+- Loss Function: Categorical Cross-Entropy Loss:
+    L_CE = - SUM [ y_c * log(y_pred_c) ]
+- Regularization: Dropout (p=0.3) prevents overfitting on clinical subsets.
+- Checkpoint Metric: 'vgg16_classifier.pth' achieved 74.39% validation accuracy across
+  diverse, real-world clinical skin ulcer images.
+
+
+================================================================================
+4. MODEL 4: Severity & Longitudinal Healing Status Analyzer
+================================================================================
+
+PRIMARY PURPOSE:
+Segments tissue viability inside the wound bed and determines whether the wound
+is healing, stalled, or deteriorating over time.
+
+HOW IT WORKS (INFERENCE):
+1. HSV Color Space Conversion:
+   - Converts RGB image to Hue, Saturation, Value (HSV) color space to decouple
+     chromatic color information from illumination and shadow variance.
+2. Red-Yellow-Black (RYB) Tissue Segmentation:
+   - Granulation Tissue (Red): Hue [0-10] and [160-180], Saturation [50-255], Value [50-255].
+     Healthy capillary bed indicating active proliferation and healing.
+   - Slough Tissue (Yellow): Hue [20-40], Saturation [50-255], Value [50-255].
+     Devitalized fibrinous tissue and dead inflammatory cells; requires debridement.
+   - Necrosis / Eschar (Black/Dark Brown): Value [0-80].
+     Dead tissue; indicates high infection risk and microvascular breakdown.
+3. Morphological Filtering:
+   - 5x5 Opening (erosion followed by dilation) and Closing clean camera sensor noise
+     and remove flash artifacts.
+4. Clinical Severity Score (1 to 5):
+   - Score 5 (Critical): Necrosis > 50%
+   - Score 4 (Severe): Necrosis > 20% OR Slough > 50%
+   - Score 3 (Moderate): Slough > 25% OR Granulation < 50%
+   - Score 2 (Mild-Moderate): Granulation >= 50%
+   - Score 1 (Mild / Healed): Granulation >= 80% with negligible necrosis/slough
+5. Longitudinal Healing Progression:
+   - Compares current surface area against baseline area:
+       Relative Change = (Current_Area - Baseline_Area) / Baseline_Area
+   - Change < -5.0%: HEALING (Improving / shrinking)
+   - Change > +5.0%: NOT HEALING (Deteriorating / enlarging)
+   - Between -5.0% and +5.0%: STALLED (Stable)
+
+HOW IT WAS CALIBRATED:
+- Follows the clinical TIME Principle (Tissue, Infection, Moisture, Edge) and the
+  World Union of Wound Healing Societies (WUWHS) RYB assessment framework.
+- Threshold boundaries and morphological kernels were empirically tuned on clinical wound
+  image sets across varying skin tones and clinic lighting conditions.
+================================================================================

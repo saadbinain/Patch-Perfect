@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 import { CircularGauge } from "../Common/CircularGauge";
 import { WoundCropAdjuster } from "./WoundCropAdjuster";
+import { GuidedCamera } from "./GuidedCamera";
+import { resolveMediaUrl } from "../../services/apiConfig";
 import { api } from "../../services/api";
 import { getWoundLabel } from "../../services/woundLabel";
 import {
@@ -142,6 +144,7 @@ export const AIAnalysisWizard = ({
   const isSimulationMode = Boolean(getSimulatedDateConfig()?.enabled);
 
   const fileInputRef = useRef(null);
+  const [showCamera, setShowCamera] = useState(false);
 
   const selectedPatient =
     patients.find((p) => getPatientId(p) === selectedPatientId) ||
@@ -215,6 +218,31 @@ export const AIAnalysisWizard = ({
     setWoundBoxDetected(detected);
     setCardFound(card);
     setIsDetectingBox(false);
+  };
+
+  // Last photo of this wound: shown faintly in the guided camera, and its card size
+  // is the target for the distance guide.
+  // (older single-wound records keep their scans on the patient, not on a wound)
+  const woundScans = selectedWound?.scans?.length
+    ? selectedWound.scans
+    : patientWounds.length <= 1
+    ? selectedPatient?.scans || []
+    : [];
+  const previousScan = [...woundScans].sort(
+    (a, b) => new Date(b.scan_date || b.scanDate || 0) - new Date(a.scan_date || a.scanDate || 0)
+  )[0];
+  const previousPhotoUrl = previousScan ? resolveMediaUrl(previousScan.image || previousScan.image_base64 || previousScan.imagePreview) : null;
+  const previousCardRatio = previousScan?.card_block_ratio ?? null;
+
+  const handleCaptured = (dataUrl) => {
+    setShowCamera(false);
+    setImagePreview(dataUrl);
+    detectBoxFor(dataUrl);
+  };
+
+  const openPhoneCamera = () => {
+    setShowCamera(false);
+    fileInputRef.current?.click();
   };
 
   const handleResetAutoBox = () => {
@@ -725,7 +753,6 @@ export const AIAnalysisWizard = ({
         <input
           type="file"
           accept="image/*"
-          capture="environment"
           ref={fileInputRef}
           onChange={handleImageChange}
           style={{ display: "none" }}
@@ -751,21 +778,21 @@ export const AIAnalysisWizard = ({
                 Colour card found: size will be measured in cm².
               </p>
             )}
-            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "2px" }}>
-              <button
-                type="button"
-                style={{ ...smallButton, color: "#8B1E1E" }}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                Choose different photo
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "2px" }}>
+              <button type="button" style={{ ...smallButton, color: "#8B1E1E" }} onClick={() => setShowCamera(true)}>
+                Retake with guide
+              </button>
+              <button type="button" style={{ ...smallButton, color: "#475569" }} onClick={() => fileInputRef.current?.click()}>
+                Choose from gallery
               </button>
             </div>
           </div>
         ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
           <button
             type="button"
             className="camera-upload-dropzone"
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => setShowCamera(true)}
             style={{ width: "100%" }}
           >
             <div
@@ -783,13 +810,30 @@ export const AIAnalysisWizard = ({
             >
               <Camera size={28} />
             </div>
-            <strong style={{ fontSize: "0.95rem", color: "#1E293B" }}>Take or choose a photo</strong>
+            <strong style={{ fontSize: "0.95rem", color: "#1E293B" }}>Take photo with guide</strong>
             <p style={{ fontSize: "0.76rem", color: "#64748B", marginTop: "6px", lineHeight: 1.45 }}>
-              Good light, camera parallel to the wound,
+              {previousPhotoUrl
+                ? "Lines up with the last photo of this wound"
+                : "Checks light, focus and the colour card"}
               <br />
-              whole wound edge in frame
+              whole wound edge in frame, card beside it
             </p>
           </button>
+          <button type="button" style={{ ...smallButton, alignSelf: "center", color: "#475569" }} onClick={() => fileInputRef.current?.click()}>
+            Choose from gallery instead
+          </button>
+          </div>
+        )}
+
+        {showCamera && (
+          <GuidedCamera
+            previousPhotoUrl={previousPhotoUrl}
+            previousCardRatio={previousCardRatio}
+            woundId={selectedWound?.id}
+            onCapture={handleCaptured}
+            onCancel={() => setShowCamera(false)}
+            onFallback={openPhoneCamera}
+          />
         )}
 
         {renderDateRow()}
@@ -986,7 +1030,12 @@ export const AIAnalysisWizard = ({
         tone: typeTone,
         note: analysisResult.woundTypeLocked ? "Set at first scan" : "Kept for this wound",
       },
-      { label: "Severity", value: analysisResult.severityLevel, tone: severityTone },
+      {
+        label: "Severity",
+        value: analysisResult.severityLevel,
+        tone: severityTone,
+        note: analysisResult.pipelineResults?.severitySizeAdjusted ? "Raised: large wound" : null,
+      },
       {
         label: "Healing",
         value: analysisResult.healingStatus,

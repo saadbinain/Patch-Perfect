@@ -106,6 +106,7 @@ export const PatientDetailScreen = ({
       granulation: scan.granulation_percent ?? 50,
       slough: scan.slough_percent ?? 35,
       necrotic: scan.necrotic_percent ?? 15,
+      epithelial: scan.epithelial_percent ?? null,
     };
   };
 
@@ -1086,7 +1087,15 @@ export const PatientDetailScreen = ({
                     <span style={{ fontSize: "0.7rem", fontWeight: "800", color: "#64748B", textTransform: "uppercase", display: "block", marginBottom: "6px" }}>
                       Tissue breakdown (colour analysis)
                     </span>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "8px", fontSize: "0.74rem", textAlign: "center" }}>
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: activeTissue.epithelial != null ? "1fr 1fr" : "1fr 1fr 1fr",
+                        gap: "8px",
+                        fontSize: "0.74rem",
+                        textAlign: "center",
+                      }}
+                    >
                       <div style={{ background: "#F0FDF4", padding: "6px", borderRadius: "8px", border: "1px solid #BBF7D0", color: "#166534" }}>
                         Pink Granulation: <strong style={{ display: "block", fontSize: "0.84rem" }}>{activeTissue.granulation}%</strong>
                       </div>
@@ -1096,6 +1105,11 @@ export const PatientDetailScreen = ({
                       <div style={{ background: "#FEF2F2", padding: "6px", borderRadius: "8px", border: "1px solid #FECDD3", color: "#991B1B" }}>
                         Necrotic Eschar: <strong style={{ display: "block", fontSize: "0.84rem" }}>{activeTissue.necrotic}%</strong>
                       </div>
+                      {activeTissue.epithelial != null && (
+                        <div style={{ background: "#EFF6FF", padding: "6px", borderRadius: "8px", border: "1px solid #BFDBFE", color: "#1E40AF" }}>
+                          New Skin / Scar: <strong style={{ display: "block", fontSize: "0.84rem" }}>{activeTissue.epithelial}%</strong>
+                        </div>
+                      )}
                     </div>
                   </div>
 

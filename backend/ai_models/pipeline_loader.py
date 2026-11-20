@@ -32,7 +32,7 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 from .preprocessor import preprocess_wound_image, load_image_from_input
-from .severity_analyzer import analyze_tissue_and_severity, evaluate_healing_status
+from .severity_analyzer import analyze_tissue_and_severity, evaluate_healing_status, apply_wound_size
 from .colour_card import detect_colour_card, apply_white_balance
 
 AI_MODELS_DIR = Path(__file__).resolve().parent
@@ -120,15 +120,33 @@ def _parse_crop_box(crop_box, img_w, img_h):
 DISTANCE_CHANGE_WARN = 1.25
 
 
+# Gaps in the outline up to this share of the wound's size are closed (see _wound_bed).
+WOUND_BED_CLOSE = 0.2
+
+
+def _wound_bed(mask):
+    """
+    The whole wound bed: the segmenter tends to leave slough and dead tissue out,
+    as holes or as a bay that opens to the edge of the outline. Small gaps in the
+    outline are closed (scaled to the wound's size) and the result is filled, so that
+    tissue is measured and its colour analysed.
+    """
+    if mask is None or not mask.any():
+        return mask
+    mask = mask.astype(np.uint8)
+    k = max(5, int(np.sqrt(mask.sum()) * WOUND_BED_CLOSE)) | 1
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    bed = np.zeros_like(mask)
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(bed, contours, -1, 1, thickness=cv2.FILLED)
+    return bed | mask
+
+
 def _filled_area_ratio(mask):
-    """Wound size as a share of the photo, measured from the filled outline: slough or
-    dead tissue that the segmenter leaves as a hole inside the wound is still wound bed."""
+    """Wound size as a share of the photo, measured on the whole wound bed."""
     if mask is None or not mask.any():
         return None
-    filled = np.zeros_like(mask)
-    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(filled, contours, -1, 1, thickness=cv2.FILLED)
-    return float(filled.sum()) / float(mask.size)
+    return float(_wound_bed(mask).sum()) / float(mask.size)
 
 
 # The whole printed card lies within this many block-widths of the block's centre
@@ -564,19 +582,28 @@ class AIPipelineManager:
                 filtered_mask[cy1:cy2, cx1:cx2] = mask[cy1:cy2, cx1:cx2]
                 if not filtered_mask.any():
                     raise ValueError("The box does not contain the wound. Widen the box so the whole wound edge is inside it.")
-                # pick the wound within the clinician's box (they may have boxed a second wound)
-                mask = _select_wound_regions(filtered_mask)
+                # The wound the AI picks on the whole photo, if it lies in the box: accepting
+                # the AI's suggested box then gives exactly the AI's own result. Only when
+                # the clinician boxed something else (e.g. a second wound) is the wound
+                # picked again inside the box.
+                selected = _select_wound_regions(mask)
+                if selected[cy1:cy2, cx1:cx2].any():
+                    bed = _wound_bed(selected)
+                else:
+                    bed = _wound_bed(_select_wound_regions(filtered_mask))
+                mask = np.zeros_like(bed)
+                mask[cy1:cy2, cx1:cx2] = bed[cy1:cy2, cx1:cx2]
                 # Size stays a share of the FULL photo, never of the crop: a tighter box
                 # must not make the wound look bigger (false "Deteriorating").
-                area_ratio = _filled_area_ratio(mask)
+                area_ratio = float(mask.sum()) / float(mask.size)
             else:
                 area_ratio = None
         else:
             active_bbox = auto_bbox
             if mask is not None:
-                mask = _select_wound_regions(mask)
+                mask = _wound_bed(_select_wound_regions(mask))
                 active_bbox = _bbox_of(mask) or auto_bbox
-            area_ratio = _filled_area_ratio(mask) if mask is not None else raw_area_ratio
+            area_ratio = float(mask.sum()) / float(mask.size) if mask is not None else raw_area_ratio
 
         if active_bbox:
             crop = pil_img.crop(active_bbox)
@@ -622,6 +649,8 @@ class AIPipelineManager:
         sev = analyze_tissue_and_severity(apply_white_balance(crop, card["white_balance_gains"]), region_mask=crop_mask)
         if not sev["tissue_detected"]:
             raise ValueError("No wound tissue could be identified in this photo. Retake it closer to the wound, in good light.")
+        # Size-aware severity: a large wound is at least Moderate, however clean it looks.
+        sev = apply_wound_size(sev, area_cm2)
 
         # Longitudinal healing: wound area vs the Day 1 scan of this same wound
         # Compare in cm2 when both scans have it; otherwise fall back to share of the
@@ -636,12 +665,30 @@ class AIPipelineManager:
             if baseline_scan is not None and not similarity_data.get("is_baseline") and current_area and baseline_area:
                 warnings.append("Healing trend uses the wound's share of the photo because the Day 1 scan has no cm² measurement; "
                                 "it is only reliable if both photos were taken from the same distance.")
+        tissue_stats = {
+            "granulation": sev["granulation_pct"],
+            "slough": sev["slough_pct"],
+            "necrotic": sev["necrosis_pct"],
+            "epithelial": sev["epithelial_pct"],
+        }
+        # Tissue is only compared with a Day 1 scan graded by the same colour rules
+        # (older scans have no new-skin value and under-counted slough).
+        baseline_tissue = None
+        if baseline_scan is not None and getattr(baseline_scan, 'epithelial_percent', None) is not None:
+            baseline_tissue = {
+                "granulation": baseline_scan.granulation_percent,
+                "slough": baseline_scan.slough_percent,
+                "necrotic": baseline_scan.necrotic_percent,
+                "epithelial": baseline_scan.epithelial_percent,
+            }
         healing_status = evaluate_healing_status(
             current_area=current_area,
             baseline_area=baseline_area,
             current_severity_score=sev["severity_score"],
             baseline_severity_score=getattr(baseline_scan, 'severity_score', None) if baseline_scan else None,
             is_baseline=bool(similarity_data.get("is_baseline")),
+            current_tissue=tissue_stats,
+            baseline_tissue=baseline_tissue,
         )
 
         return {
@@ -656,11 +703,8 @@ class AIPipelineManager:
                 "similarity": similarity_data,
                 "segmentation": segmentation_data,
                 "classification": classification_data,
-                "tissue_stats": {
-                    "granulation": sev["granulation_pct"],
-                    "slough": sev["slough_pct"],
-                    "necrotic": sev["necrosis_pct"],
-                },
+                "tissue_stats": tissue_stats,
+                "severity_size_adjusted": sev["size_adjusted"],
                 "tissue_method": "HSV colour analysis" + (" within wound mask" if crop_mask is not None else " on whole photo")
                                  + (", colour-corrected with the card" if card["white_balance_gains"] else ""),
                 "colour_card": {**_card_summary(card), "distance_vs_previous": distance_change},

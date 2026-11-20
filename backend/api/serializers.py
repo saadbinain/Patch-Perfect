@@ -102,7 +102,7 @@ class WoundAssessmentScanSerializer(serializers.ModelSerializer):
             'id', 'patient', 'wound_profile', 'image', 'wound_area_ratio', 'wound_area_cm2', 'card_block_ratio',
             'severity_score', 'severity_level', 'healing_status',
             'wound_type', 'anatomical_location', 'recommendation',
-            'granulation_percent', 'slough_percent', 'necrotic_percent',
+            'granulation_percent', 'slough_percent', 'necrotic_percent', 'epithelial_percent',
             'tissue_stats', 'is_latest', 'scan_date', 'scan_date_formatted'
         ]
         read_only_fields = ['id', 'scan_date']
@@ -112,6 +112,7 @@ class WoundAssessmentScanSerializer(serializers.ModelSerializer):
             'granulation': obj.granulation_percent,
             'slough': obj.slough_percent,
             'necrotic': obj.necrotic_percent,
+            'epithelial': obj.epithelial_percent,
         }
 
 
