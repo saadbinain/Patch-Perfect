@@ -56,6 +56,7 @@ SEG_THRESHOLD = 0.5
 MIN_WOUND_AREA_RATIO = 0.001     # below this, treat as "no wound found"
 LOW_CLASSIFIER_CONFIDENCE = 0.5
 SIMILARITY_THRESHOLD = 0.65
+MAX_REFERENCE_SCANS = 30         # earlier photos of a wound checked for the identity match
 
 
 def _first_existing(*globs):
@@ -227,54 +228,93 @@ class AIPipelineManager:
                 return None
         return None
 
-    def _check_similarity(self, current_pil, wound_profile, baseline_scan, baseline_image_input, warnings):
-        wound_title = (wound_profile.label or wound_profile.anatomical_location) if wound_profile else "this wound"
-
-        # The stored Day 1 scan is authoritative; a client-supplied baseline is only
-        # used when there is no server record (e.g. offline demo data).
-        baseline_pil = self._scan_image(baseline_scan)
-        if baseline_pil is None and baseline_scan is None and baseline_image_input:
+    def _history_references(self, wound_profile, baseline_image_input):
+        """
+        Earlier photos of this wound, newest first: [{"date", "pil"}], plus whether the
+        wound has any earlier scans at all. A client-supplied baseline is only used when
+        the server has no record of the wound (e.g. offline demo data).
+        """
+        refs, has_history = [], False
+        if wound_profile is not None:
+            scans = list(wound_profile.scans.order_by('-scan_date', '-id')[:MAX_REFERENCE_SCANS])
+            has_history = bool(scans)
+            for scan in scans:
+                pil = self._scan_image(scan)
+                if pil is not None:
+                    refs.append({"date": scan.scan_date.date().isoformat() if scan.scan_date else None, "pil": pil})
+        if not has_history and baseline_image_input:
             try:
-                baseline_pil = preprocess_wound_image(baseline_image_input)["pil_image"]
+                refs.append({"date": None, "pil": preprocess_wound_image(baseline_image_input)["pil_image"]})
+                has_history = True
             except Exception:
-                baseline_pil = None
+                pass
+        return refs, has_history
 
-        if baseline_scan is None and baseline_pil is None:
-            return {
-                "model": "ResNet50",
-                "is_baseline": True,
-                "is_same_wound": True,
-                "similarity_score": None,
-                "confidence": None,
-                "status": f"Day 1 baseline established for {wound_title}",
-                "warning": None,
-            }
+    def match_against_history(self, current_pil, references, has_history, wound_title, warnings):
+        """
+        Wound identity check (Stage 1).
 
-        if baseline_pil is None or self.wound_comparator is None:
-            warnings.append("Could not compare with the Day 1 photo, so the wound match was not checked.")
-            return {"model": "ResNet50", "is_baseline": False, "is_same_wound": None,
-                    "similarity_score": None, "confidence": None,
-                    "status": "Baseline comparison unavailable", "warning": None}
+        1. Compare with the PREVIOUS scan: consecutive visits look most alike.
+        2. If that fails (e.g. the wound has healed and changed a lot), compare with
+           EVERY earlier scan of this wound and accept the best match.
+        Only when no earlier photo matches is the scan flagged as a possible different wound.
+        """
+        base = {"model": "ResNet50", "threshold_used": SIMILARITY_THRESHOLD, "scans_compared": 0,
+                "compared_with": None, "reference_date": None}
 
-        baseline_pil = baseline_pil.resize(current_pil.size)
-        result = self.wound_comparator.compare(baseline_pil, current_pil, threshold=SIMILARITY_THRESHOLD)
-        similarity = float(result['similarity'])
-        is_same = bool(result['is_same_wound'])
+        if not has_history:
+            return {**base, "is_baseline": True, "is_same_wound": True, "similarity_score": None,
+                    "confidence": None, "status": f"Day 1 baseline established for {wound_title}", "warning": None}
+
+        if not references or self.wound_comparator is None:
+            warnings.append("Could not compare with earlier photos of this wound, so the wound match was not checked.")
+            return {**base, "is_baseline": False, "is_same_wound": None, "similarity_score": None,
+                    "confidence": None, "status": "Comparison with earlier photos unavailable", "warning": None}
+
         if getattr(self.wound_comparator, "method", "resnet50") != "resnet50":
             warnings.append("ResNet-50 weights unavailable; wound matching used a basic colour comparison.")
-        return {
-            "model": "ResNet50",
+
+        scores = self.wound_comparator.similarities(current_pil, [r["pil"] for r in references])
+        previous_score = scores[0]
+        if previous_score >= SIMILARITY_THRESHOLD:
+            idx, compared_with = 0, "previous"
+        else:
+            idx = int(np.argmax(scores))
+            compared_with = "earlier" if scores[idx] >= SIMILARITY_THRESHOLD else None
+
+        best = scores[idx]
+        result = {
+            **base,
             "is_baseline": False,
-            "is_same_wound": is_same,
-            "similarity_score": round(similarity, 3),
-            "confidence": f"{similarity:.1%}",
-            "threshold_used": SIMILARITY_THRESHOLD,
-            "status": f"Matches Day 1 baseline ({similarity:.1%})" if is_same else f"Wound mismatch ({similarity:.1%})",
-            "warning": None if is_same else (
-                f"Visual similarity with the Day 1 photo of {wound_title} is only {similarity:.1%} "
-                f"(below the {SIMILARITY_THRESHOLD:.0%} threshold). This may be a different wound."
+            "scans_compared": len(scores),
+            "previous_scan_score": round(previous_score, 3),
+            "similarity_score": round(best, 3),
+            "confidence": f"{best:.1%}",
+            "compared_with": compared_with,
+            "reference_date": references[idx]["date"],
+        }
+        if compared_with == "previous":
+            return {**result, "is_same_wound": True, "warning": None,
+                    "status": f"Matches the previous scan ({best:.1%})"}
+        if compared_with == "earlier":
+            when = f" from {references[idx]['date']}" if references[idx]["date"] else ""
+            return {**result, "is_same_wound": True, "warning": None,
+                    "status": f"Matches an earlier scan{when} ({best:.1%}); previous scan {previous_score:.1%}"}
+        return {
+            **result,
+            "is_same_wound": False,
+            "status": f"Wound mismatch (best {best:.1%})",
+            "warning": (
+                f"This photo doesn't match the previous photo of {wound_title} or any of its "
+                f"{len(scores)} earlier photo{'s' if len(scores) != 1 else ''} (best match {best:.1%}, "
+                f"threshold {SIMILARITY_THRESHOLD:.0%}). This may be a different wound."
             ),
         }
+
+    def _check_similarity(self, current_pil, wound_profile, baseline_image_input, warnings):
+        wound_title = (wound_profile.label or wound_profile.anatomical_location) if wound_profile else "this wound"
+        references, has_history = self._history_references(wound_profile, baseline_image_input)
+        return self.match_against_history(current_pil, references, has_history, wound_title, warnings)
 
     # ------------------------------------------------------------------ main
     def run_inference(self, image_input, patient=None, wound_profile=None, baseline_image_input=None):
@@ -294,7 +334,7 @@ class AIPipelineManager:
         baseline_scan = self._baseline_scan(wound_profile)
 
         # Stage 1: similarity
-        similarity_data = self._check_similarity(pil_img, wound_profile, baseline_scan, baseline_image_input, warnings)
+        similarity_data = self._check_similarity(pil_img, wound_profile, baseline_image_input, warnings)
 
         # Stage 2: segmentation
         mask, bbox, area_ratio = self._segment(pil_img)

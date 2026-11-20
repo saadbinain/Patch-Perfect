@@ -210,6 +210,58 @@ class SeverityAnalyzerTests(unittest.TestCase):
         self.assertEqual(evaluate_healing_status(current_severity_score=2, baseline_severity_score=4), "Improving")
 
 
+class HistoryMatchTests(unittest.TestCase):
+    """Wound identity: previous scan first, then all earlier scans."""
+
+    class StubComparator:
+        method = "resnet50"
+
+        def __init__(self, scores):
+            self.scores = scores
+
+        def similarities(self, current, references):
+            return self.scores[: len(references)]
+
+    def match(self, scores, has_history=True):
+        manager = pipeline_loader.AIPipelineManager.__new__(pipeline_loader.AIPipelineManager)
+        manager.wound_comparator = self.StubComparator(scores)
+        refs = [{"date": f"2024-0{i + 1}-01", "pil": Image.new("RGB", (8, 8))} for i in range(len(scores))]
+        warnings = []
+        return manager.match_against_history(Image.new("RGB", (8, 8)), refs, has_history, "Scalp", warnings), warnings
+
+    def test_first_scan_is_baseline(self):
+        result, _ = self.match([], has_history=False)
+        self.assertTrue(result["is_baseline"])
+
+    def test_matches_previous_scan(self):
+        result, _ = self.match([0.82, 0.40, 0.30])  # newest first
+        self.assertTrue(result["is_same_wound"])
+        self.assertEqual(result["compared_with"], "previous")
+        self.assertEqual(result["similarity_score"], 0.82)
+
+    def test_falls_back_to_best_earlier_scan(self):
+        # previous photo looks different, but an older one matches
+        result, _ = self.match([0.50, 0.71, 0.60])
+        self.assertTrue(result["is_same_wound"])
+        self.assertEqual(result["compared_with"], "earlier")
+        self.assertEqual(result["reference_date"], "2024-02-01")
+        self.assertEqual(result["previous_scan_score"], 0.5)
+
+    def test_flags_mismatch_only_when_nothing_matches(self):
+        result, _ = self.match([0.50, 0.40, 0.62])
+        self.assertFalse(result["is_same_wound"])
+        self.assertEqual(result["similarity_score"], 0.62)
+        self.assertIn("3 earlier photos", result["warning"])
+
+    def test_history_without_readable_photos_is_reported(self):
+        manager = pipeline_loader.AIPipelineManager.__new__(pipeline_loader.AIPipelineManager)
+        manager.wound_comparator = self.StubComparator([])
+        warnings = []
+        result = manager.match_against_history(Image.new("RGB", (8, 8)), [], True, "Scalp", warnings)
+        self.assertIsNone(result["is_same_wound"])
+        self.assertTrue(warnings)
+
+
 class PipelineLoadingTests(unittest.TestCase):
     def test_mismatched_checkpoint_is_reported_not_loaded(self):
         import torch

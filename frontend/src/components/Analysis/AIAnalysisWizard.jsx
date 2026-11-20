@@ -857,7 +857,7 @@ export const AIAnalysisWizard = ({
           </div>
           <p style={{ fontSize: "0.8rem", color: "#7F1D1D", margin: 0, lineHeight: 1.45 }}>
             {sim.warning ||
-              `The photo only matches the Day 1 baseline of ${woundName} at ${sim.confidence || "below 65%"}. Check you selected the right patient and wound site.`}
+              `This photo doesn't match any earlier photo of ${woundName} (best ${sim.confidence || "below 65%"}). Check you selected the right patient and wound site.`}
           </p>
           <label style={{ display: "flex", alignItems: "flex-start", gap: "8px", fontSize: "0.8rem", color: "#7F1D1D", fontWeight: 600, cursor: "pointer" }}>
             <input
@@ -894,13 +894,17 @@ export const AIAnalysisWizard = ({
         <CheckCircle2 size={16} color={tone.icon} style={{ flexShrink: 0 }} />
         <span>
           {isBaseline ? (
-            <>First scan of <strong>{woundName}</strong> — saved as the Day 1 baseline for future comparisons.</>
+            <>First scan of <strong>{woundName}</strong> — later scans will be compared with it.</>
+          ) : sim.is_same_wound === null || sim.isSameWound === null ? (
+            <>Not compared with earlier photos of this wound.</>
+          ) : sim.compared_with === "earlier" ? (
+            // previous photo looked different (e.g. the wound changed), but an earlier one matched
+            <>
+              Matches an earlier scan of {woundName}
+              {sim.reference_date ? ` from ${sim.reference_date}` : ""} ({sim.confidence}).
+            </>
           ) : (
-            sim.is_same_wound === null || sim.isSameWound === null ? (
-              <>Not compared with the Day 1 photo.</>
-            ) : (
-              <>Matches the {woundName} baseline{sim.confidence ? ` (${sim.confidence})` : ""}.</>
-            )
+            <>Matches the previous scan of {woundName}{sim.confidence ? ` (${sim.confidence})` : ""}.</>
           )}
         </span>
       </div>

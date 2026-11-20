@@ -89,6 +89,21 @@ class WoundComparator:
         norm = np.linalg.norm(vec)
         return vec / norm if norm > 0 else vec
 
+    def similarities(self, current, references):
+        """
+        Cosine similarity (0..1) of one photo against several earlier photos, in the same
+        order. The current photo's embedding is computed once and reused.
+        """
+        if not references:
+            return []
+        current = current.convert("RGB")
+        emb_current = self._get_embedding(current)
+        scores = []
+        for ref in references:
+            ref = ref.convert("RGB").resize(current.size)
+            scores.append(max(0.0, min(1.0, float(np.dot(emb_current, self._get_embedding(ref))))))
+        return scores
+
     def compare(self, img1, img2, threshold=0.65):
         """
         Compares two PIL images and returns similarity score and match decision.
