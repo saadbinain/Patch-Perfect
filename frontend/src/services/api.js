@@ -352,6 +352,8 @@ export const api = {
         colourCard: metrics.colour_card,
         sizeBasis: metrics.size_basis,
         severitySizeAdjusted: Boolean(metrics.severity_size_adjusted),
+        healingVsPrevious: metrics.healing_vs_previous || null,
+        healingVsDay1: metrics.healing_vs_day1 || null,
       },
     };
   },

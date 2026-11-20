@@ -166,58 +166,67 @@ def apply_wound_size(sev, area_cm2):
     return out
 
 
-def worst_tissue(tissue):
-    """
-    Worst tissue present, PUSH-style: 4 necrotic, 3 slough, 2 granulation, 1 new skin.
-    A class counts once it covers a meaningful part of the wound.
-    """
-    if not tissue:
-        return None
-    if (tissue.get("necrotic") or 0) >= 5:
-        return 4
-    if (tissue.get("slough") or 0) >= 10:
-        return 3
-    if (tissue.get("granulation") or 0) >= 20:
-        return 2
-    return 1
+# A tissue change counts only when it is clear, so readings that hover around a
+# threshold between visits do not flip the trend.
+NECROSIS_STEP = 5.0     # percentage points
+SLOUGH_STEP = 15.0      # percentage points, and slough must reach SLOUGH_MIN
+SLOUGH_MIN = 20.0
+SHRINK_OUTWEIGHS_SLOUGH = -0.20   # a wound that shrank this much is improving despite more slough
+
+
+def tissue_change(current, reference):
+    """(necrosis_worse, slough_worse, tissue_better) between two tissue mixes."""
+    if not current or not reference:
+        return False, False, False
+    dn = (current.get("necrotic") or 0) - (reference.get("necrotic") or 0)
+    ds = (current.get("slough") or 0) - (reference.get("slough") or 0)
+    necrosis_worse = dn >= NECROSIS_STEP and (current.get("necrotic") or 0) >= NECROSIS_STEP
+    slough_worse = ds >= SLOUGH_STEP and (current.get("slough") or 0) >= SLOUGH_MIN
+    better = (dn <= -NECROSIS_STEP) or (ds <= -SLOUGH_STEP and (reference.get("slough") or 0) >= SLOUGH_MIN)
+    return necrosis_worse, slough_worse, better and not (necrosis_worse or slough_worse)
 
 
 def evaluate_healing_status(current_area=None, baseline_area=None, current_severity_score=3,
                             baseline_severity_score=None, is_baseline=False,
                             current_tissue=None, baseline_tissue=None):
     """
-    Longitudinal healing status for one wound, relative to its Day 1 scan.
+    Healing status of a wound compared with an earlier scan of it (the app passes the
+    previous scan; "baseline_*" are that scan's values).
 
     Areas are cm2 when both scans have them (otherwise share of the photo, which is only
     comparable at the same camera distance). Tissue dicts hold granulation / slough /
     necrotic / epithelial percentages.
-    - First scan of a wound                       -> "Baseline"
-    - Worse tissue appears (e.g. new necrosis)    -> "Deteriorating", even if smaller
-    - Area change > +5%                           -> "Deteriorating"
-    - Area change < -5%                           -> "Improving"
-    - Otherwise / no area: tissue got better      -> "Improving"
-    - Otherwise / no area: severity change vs Day 1, else "Stable"
+    - First scan of a wound                          -> "Baseline"
+    - Necrosis appeared / grew (+5 points)           -> "Deteriorating", even if smaller
+    - Severity score went up                         -> "Deteriorating"
+    - Slough grew (+15 points, to 20%+) unless the wound shrank 20%+  -> "Deteriorating"
+    - Area change > +5%                              -> "Deteriorating"
+    - Area change < -5%                              -> "Improving"
+    - Otherwise: tissue or severity got better       -> "Improving", else "Stable"
     """
     if is_baseline:
         return "Baseline"
 
-    cur_t, base_t = worst_tissue(current_tissue), worst_tissue(baseline_tissue)
-    if cur_t is not None and base_t is not None and cur_t > base_t:
-        return "Deteriorating"
-
+    area_change = None
     if current_area and baseline_area and baseline_area > 0:
         area_change = (current_area - baseline_area) / baseline_area
+
+    necrosis_worse, slough_worse, tissue_better = tissue_change(current_tissue, baseline_tissue)
+    if necrosis_worse:
+        return "Deteriorating"
+    if baseline_severity_score is not None and current_severity_score > baseline_severity_score:
+        return "Deteriorating"
+    if slough_worse and (area_change is None or area_change > SHRINK_OUTWEIGHS_SLOUGH):
+        return "Deteriorating"
+
+    if area_change is not None:
         if area_change > 0.05:
             return "Deteriorating"
         if area_change < -0.05:
             return "Improving"
 
-    if cur_t is not None and base_t is not None and cur_t < base_t:
+    if tissue_better:
         return "Improving"
-
-    if baseline_severity_score is not None:
-        if current_severity_score < baseline_severity_score:
-            return "Improving"
-        if current_severity_score > baseline_severity_score:
-            return "Deteriorating"
+    if baseline_severity_score is not None and current_severity_score < baseline_severity_score:
+        return "Improving"
     return "Stable"

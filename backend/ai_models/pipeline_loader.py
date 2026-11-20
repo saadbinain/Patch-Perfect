@@ -774,44 +774,67 @@ class AIPipelineManager:
         # Size-aware severity: a large wound is at least Moderate, however clean it looks.
         sev = apply_wound_size(sev, area_cm2)
 
-        # Longitudinal healing: wound area vs the Day 1 scan of this same wound
-        # Compare in cm2 when both scans have it; otherwise fall back to share of the
-        # photo, which is only fair when both photos were taken at the same distance.
-        baseline_cm2 = getattr(baseline_scan, 'wound_area_cm2', None) if baseline_scan else None
-        if area_cm2 is not None and baseline_cm2:
-            current_area, baseline_area, size_basis = area_cm2, baseline_cm2, "cm2"
-        else:
-            current_area = segmentation_data["wound_area_ratio"]
-            baseline_area = getattr(baseline_scan, 'wound_area_ratio', None) if baseline_scan else None
-            size_basis = "photo share"
-            if baseline_scan is not None and not similarity_data.get("is_baseline") and current_area and baseline_area:
-                warnings.append("Healing trend uses the wound's share of the photo because the Day 1 scan has no cm² measurement; "
-                                "it is only reliable if both photos were taken from the same distance.")
         tissue_stats = {
             "granulation": sev["granulation_pct"],
             "slough": sev["slough_pct"],
             "necrotic": sev["necrosis_pct"],
             "epithelial": sev["epithelial_pct"],
         }
-        # Tissue is only compared with a Day 1 scan graded by the same colour rules
-        # (older scans have no new-skin value and under-counted slough).
-        baseline_tissue = None
-        if baseline_scan is not None and getattr(baseline_scan, 'epithelial_percent', None) is not None:
-            baseline_tissue = {
-                "granulation": baseline_scan.granulation_percent,
-                "slough": baseline_scan.slough_percent,
-                "necrotic": baseline_scan.necrotic_percent,
-                "epithelial": baseline_scan.epithelial_percent,
-            }
-        healing_status = evaluate_healing_status(
-            current_area=current_area,
-            baseline_area=baseline_area,
-            current_severity_score=sev["severity_score"],
-            baseline_severity_score=getattr(baseline_scan, 'severity_score', None) if baseline_scan else None,
-            is_baseline=bool(similarity_data.get("is_baseline")),
-            current_tissue=tissue_stats,
-            baseline_tissue=baseline_tissue,
-        )
+
+        def compare_with(ref):
+            """Healing status of this scan against an earlier scan of the same wound.
+            Size is compared only in cm2, i.e. when BOTH photos had the colour card; the
+            share of the photo depends on camera distance, so without the card size is
+            left out and the trend comes from tissue and severity alone. Tissue and
+            severity are compared only with scans graded by the same rules (older scans
+            have no new-skin value, under-counted slough and had no size-aware severity)."""
+            ref_cm2 = getattr(ref, 'wound_area_cm2', None)
+            same_rules = getattr(ref, 'epithelial_percent', None) is not None
+            if area_cm2 is not None and ref_cm2:
+                cur_area, ref_area, basis = area_cm2, ref_cm2, "cm2"
+            else:
+                cur_area = ref_area = None
+                basis = "tissue and severity" if same_rules else None
+            ref_tissue = {
+                "granulation": ref.granulation_percent, "slough": ref.slough_percent,
+                "necrotic": ref.necrotic_percent, "epithelial": ref.epithelial_percent,
+            } if same_rules else None
+            if basis is None:
+                # no cm2 on both scans and the earlier scan used the old tissue rules:
+                # nothing fair to compare, so say so instead of guessing "Stable"
+                return {"status": "Not compared", "size_basis": None, "size_change": None,
+                        "severity_then": getattr(ref, 'severity_score', None)}
+            status = evaluate_healing_status(
+                current_area=cur_area,
+                baseline_area=ref_area,
+                current_severity_score=sev["severity_score"],
+                baseline_severity_score=getattr(ref, 'severity_score', None) if same_rules else None,
+                current_tissue=tissue_stats,
+                baseline_tissue=ref_tissue,
+            )
+            change = round((cur_area - ref_area) / ref_area, 3) if cur_area and ref_area else None
+            return {"status": status, "size_basis": basis, "size_change": change,
+                    "severity_then": getattr(ref, 'severity_score', None)}
+
+        # Healing status is the change since the PREVIOUS scan (so a wound that gets
+        # worse this week reads "Deteriorating", even if it is still smaller than on
+        # Day 1). The change since Day 1 is reported alongside.
+        is_first = bool(similarity_data.get("is_baseline")) or previous_scan is None
+        vs_previous = vs_day1 = None
+        if is_first:
+            healing_status, size_basis = "Baseline", None
+        else:
+            vs_previous = compare_with(previous_scan)
+            vs_day1 = compare_with(baseline_scan) if baseline_scan is not None else None
+            healing_status, size_basis = vs_previous["status"], vs_previous["size_basis"]
+            if size_basis != "cm2":
+                missing = "this photo" if area_cm2 is None else "the previous scan"
+                if size_basis is None:
+                    warnings.append(f"Healing trend could not be worked out: {missing} has no colour card, so size can't be "
+                                    "compared, and the previous scan was graded with older tissue rules.")
+                else:
+                    warnings.append(f"Size was left out of the healing trend because {missing} has no colour card; "
+                                    "the trend is based on tissue and severity only.")
 
         return {
             "severity_score": sev["severity_score"],
@@ -831,6 +854,8 @@ class AIPipelineManager:
                                  + (", colour-corrected with the card" if card["white_balance_gains"] else ""),
                 "colour_card": {**_card_summary(card), "distance_vs_previous": distance_change},
                 "size_basis": size_basis,
+                "healing_vs_previous": vs_previous,
+                "healing_vs_day1": vs_day1,
                 "wound_pixels": sev["wound_pixels"],
                 "raw_severity_level": sev.get("raw_severity_level"),
             },

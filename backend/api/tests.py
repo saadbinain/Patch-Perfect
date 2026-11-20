@@ -816,3 +816,59 @@ class ColourAwarePickingTests(unittest.TestCase):
         selected = pipeline_loader._select_wound_regions(mask, Image.fromarray(img))
         self.assertTrue(selected[330, 300])
         self.assertFalse(selected[30, 70])
+
+
+class TrendVsPreviousScanTests(unittest.TestCase):
+    """The healing status is the change since the previous scan; Day 1 is reported alongside."""
+
+    def test_severity_increase_alone_is_deteriorating(self):
+        self.assertEqual(evaluate_healing_status(
+            current_area=20.0, baseline_area=20.3, current_severity_score=3, baseline_severity_score=2), "Deteriorating")
+
+    def test_severity_drop_at_same_size_is_improving(self):
+        self.assertEqual(evaluate_healing_status(
+            current_area=20.0, baseline_area=20.3, current_severity_score=2, baseline_severity_score=3), "Improving")
+
+    @staticmethod
+    def scan(cm2, severity, ratio=0.02, new_rules=True):
+        return mock.Mock(wound_area_cm2=cm2, wound_area_ratio=ratio, severity_score=severity,
+                         granulation_percent=100.0, slough_percent=0.0, necrotic_percent=0.0,
+                         epithelial_percent=0.0 if new_rules else None, card_block_ratio=None)
+
+    def run_follow_up(self, previous, day1, with_card=True):
+        if with_card:
+            img, wound = card_scene(40)               # 4x3 cm wound, measured in cm2
+            mask = np.zeros((512, 512), np.uint8)
+            sx, sy = 512 / img.width, 512 / img.height
+            mask[int(wound[1] * sy):int(wound[3] * sy), int(wound[0] * sx):int(wound[2] * sx)] = 1
+        else:
+            img, mask = CropPipelineTests.wound_photo(), CropPipelineTests.wound_mask()
+        manager = CropPipelineTests().manager_with_mask(mask)
+        manager._baseline_scan = lambda wp: day1
+        manager._check_similarity = lambda *a, **k: {"is_baseline": False}
+        profile = mock.Mock()
+        profile.scans.order_by.return_value.first.return_value = previous
+        return manager.run_inference(img, wound_profile=profile)
+
+    def test_worse_than_last_scan_but_better_than_day1(self):
+        # Day 1 was 30 cm2, last week 6 cm2, today ~12 cm2 -> this week got worse
+        r = self.run_follow_up(previous=self.scan(6.0, 2), day1=self.scan(30.0, 2))
+        self.assertEqual(r["healing_status"], "Deteriorating")
+        self.assertEqual(r["pipeline_metrics"]["healing_vs_day1"]["status"], "Improving")
+        self.assertGreater(r["pipeline_metrics"]["healing_vs_previous"]["size_change"], 0.5)
+
+    def test_better_than_last_scan(self):
+        r = self.run_follow_up(previous=self.scan(20.0, 2), day1=self.scan(30.0, 2))
+        self.assertEqual(r["healing_status"], "Improving")
+
+    def test_without_card_size_is_ignored(self):
+        # last scan covered 10x more of the photo, but without the card size can't be trusted
+        r = self.run_follow_up(previous=self.scan(None, 2, ratio=0.15), day1=self.scan(None, 2, ratio=0.15), with_card=False)
+        self.assertEqual(r["healing_status"], "Stable")
+        self.assertIsNone(r["pipeline_metrics"]["healing_vs_previous"]["size_change"])
+        self.assertTrue(any("this photo has no colour card" in w for w in r["warnings"]))
+
+    def test_without_card_and_old_previous_scan_is_not_compared(self):
+        r = self.run_follow_up(previous=self.scan(None, 2, new_rules=False), day1=self.scan(None, 2, new_rules=False), with_card=False)
+        self.assertEqual(r["healing_status"], "Not compared")
+        self.assertTrue(any("could not be worked out" in w for w in r["warnings"]))

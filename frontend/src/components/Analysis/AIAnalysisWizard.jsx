@@ -1040,11 +1040,14 @@ export const AIAnalysisWizard = ({
         label: "Healing",
         value: analysisResult.healingStatus,
         tone: healingTone,
-        note: analysisResult.pipelineResults?.sizeBasis === "cm2" ? "Size compared in cm²" : null,
+        note: analysisResult.pipelineResults?.healingVsPrevious ? "Since last scan" : null,
       },
     ];
     const seg = analysisResult.pipelineResults?.segmentation || {};
     const card = analysisResult.pipelineResults?.colourCard;
+    const vsPrev = analysisResult.pipelineResults?.healingVsPrevious;
+    const vsDay1 = analysisResult.pipelineResults?.healingVsDay1;
+    const pct = (c) => (c == null ? "" : ` ${c > 0 ? "+" : "−"}${Math.abs(Math.round(c * 100))}% size`);
 
     return (
       <div className="app-card" style={{ padding: "18px 16px", display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -1106,6 +1109,35 @@ export const AIAnalysisWizard = ({
             </span>
           </span>
         </div>
+
+        {vsPrev && (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: vsDay1 ? "1fr 1fr" : "1fr",
+              gap: "8px",
+              fontSize: "0.74rem",
+              color: "#334155",
+            }}
+          >
+            <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: "12px", padding: "8px 10px" }}>
+              <span style={{ fontSize: "0.62rem", fontWeight: 700, color: "#64748B", textTransform: "uppercase", display: "block" }}>
+                Since last scan
+              </span>
+              <strong>{vsPrev.status}</strong>
+              {pct(vsPrev.size_change)}
+            </div>
+            {vsDay1 && (
+              <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: "12px", padding: "8px 10px" }}>
+                <span style={{ fontSize: "0.62rem", fontWeight: 700, color: "#64748B", textTransform: "uppercase", display: "block" }}>
+                  Since Day 1
+                </span>
+                <strong>{vsDay1.status}</strong>
+                {pct(vsDay1.size_change)}
+              </div>
+            )}
+          </div>
+        )}
 
         <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: "14px", padding: "12px 14px" }}>
           <span style={{ fontSize: "0.68rem", fontWeight: "700", color: "#64748B", textTransform: "uppercase", display: "block", marginBottom: "4px" }}>

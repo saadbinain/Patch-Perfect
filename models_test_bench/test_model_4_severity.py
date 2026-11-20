@@ -54,16 +54,19 @@ def main():
 
     if base:
         cur_seg, base_seg = r["pipeline_metrics"]["segmentation"], base["pipeline_metrics"]["segmentation"]
+        # like the app: size counts only in cm2 (both photos with the colour card)
         use_cm2 = cur_seg["wound_area_cm2"] is not None and base_seg["wound_area_cm2"] is not None
-        key = "wound_area_cm2" if use_cm2 else "wound_area_ratio"
         status = evaluate_healing_status(
-            current_area=cur_seg[key], baseline_area=base_seg[key],
+            current_area=cur_seg["wound_area_cm2"] if use_cm2 else None,
+            baseline_area=base_seg["wound_area_cm2"] if use_cm2 else None,
             current_severity_score=r["severity_score"], baseline_severity_score=base["severity_score"],
             current_tissue=r["pipeline_metrics"]["tissue_stats"],
             baseline_tissue=base["pipeline_metrics"]["tissue_stats"])
-        change = (cur_seg[key] - base_seg[key]) / base_seg[key] if base_seg[key] else 0.0
-        print(f"\n  Healing trend:  {status}  (size {change:+.0%} vs Day 1, compared in "
-              f"{'cm²' if use_cm2 else 'share of photo: only fair at the same camera distance'})")
+        if use_cm2:
+            change = (cur_seg["wound_area_cm2"] - base_seg["wound_area_cm2"]) / base_seg["wound_area_cm2"]
+            print(f"\n  Healing trend:  {status}  (size {change:+.0%} vs Day 1, compared in cm²)")
+        else:
+            print(f"\n  Healing trend:  {status}  (no colour card in both photos: size left out, tissue and severity only)")
     return 0
 
 
