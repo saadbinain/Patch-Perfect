@@ -64,7 +64,7 @@ def _generate_patient_id(owner):
 
 
 def _wound_status(severity_score, healing_status):
-    if severity_score >= 4:
+    if severity_score >= 7:  # Very Severe or Critical on the 1-10 scale
         return "ACTION NEEDED", "danger"
     if healing_status == "Deteriorating":
         return "DETERIORATING", "warning"
@@ -344,9 +344,9 @@ class WoundAssessmentScanViewSet(viewsets.ModelViewSet):
         try:
             severity_score = int(data.get('severity_score', data.get('severityScore')))
         except (TypeError, ValueError):
-            return Response({"severity_score": ["A severity score from 1 to 5 is required."]}, status=status.HTTP_400_BAD_REQUEST)
-        if not 1 <= severity_score <= 5:
-            return Response({"severity_score": ["Severity must be between 1 and 5."]}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"severity_score": ["A severity score from 1 to 10 is required."]}, status=status.HTTP_400_BAD_REQUEST)
+        if not 1 <= severity_score <= 10:
+            return Response({"severity_score": ["Severity must be between 1 and 10."]}, status=status.HTTP_400_BAD_REQUEST)
 
         severity_level = data.get('severity_level', data.get('severityLevel', 'Moderate'))
         healing_status = data.get('healing_status', data.get('healingStatus', 'Stable'))

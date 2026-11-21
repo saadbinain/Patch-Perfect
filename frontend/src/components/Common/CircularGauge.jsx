@@ -1,8 +1,9 @@
 import React from "react";
+import { SEVERITY_MAX, isSevere, isModerate, isMild } from "../../services/severityScale";
 
 export const CircularGauge = ({
   score = null,
-  maxScore = 5,
+  maxScore = SEVERITY_MAX,
   subtitle = "SEVERITY SCORE",
   size = 130,
   strokeWidth = 12,
@@ -18,9 +19,9 @@ export const CircularGauge = ({
   // Severity color grading
   const getColor = (val) => {
     if (isAwaiting) return "#94A3B8";
-    if (val >= 4) return "#DC2626"; // Crimson Red
-    if (val >= 3) return "#D97706"; // Amber / Orange
-    if (val >= 2) return "#CA8A04"; // Yellow
+    if (isSevere(val)) return "#DC2626"; // Crimson Red: Very Severe / Critical
+    if (isModerate(val)) return "#D97706"; // Amber / Orange: Moderate
+    if (isMild(val)) return "#CA8A04"; // Yellow: Mild
     return "#16A34A"; // Green
   };
 

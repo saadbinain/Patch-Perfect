@@ -27,6 +27,7 @@ import {
   formatDateInput,
   formatTimeInput,
 } from "../../services/dateService";
+import { isSevere, isModerate } from "../../services/severityScale";
 
 const STEPS = [
   { id: 1, label: "Patient" },
@@ -64,8 +65,8 @@ const toneFor = (kind, value, score) => {
   };
   if (kind === "severity") {
     if (score == null) return tones.neutral;
-    if (score >= 4) return tones.danger;
-    if (score >= 3) return tones.warning;
+    if (isSevere(score)) return tones.danger;
+    if (isModerate(score)) return tones.warning;
     return tones.success;
   }
   if (kind === "healing") {

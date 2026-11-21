@@ -1,5 +1,6 @@
 import React from "react";
 import { TrendingUp, Activity } from "lucide-react";
+import { SEVERITY_MAX } from "../../services/severityScale";
 
 export const SeverityTrendChart = ({ data = [], height = 140 }) => {
   // If no trend data exists yet
@@ -45,7 +46,7 @@ export const SeverityTrendChart = ({ data = [], height = 140 }) => {
   }
 
   const points = data;
-  const maxVal = 5; // Severity scale 1 to 5
+  const maxVal = SEVERITY_MAX; // Severity scale 1 to 10
   const paddingLeft = 32;
   const paddingRight = 24;
   const paddingTop = 15;
@@ -86,8 +87,8 @@ export const SeverityTrendChart = ({ data = [], height = 140 }) => {
           </linearGradient>
         </defs>
 
-        {/* Grid lines (1 to 5) */}
-        {[0, 1, 2, 3, 4, 5].map((val) => {
+        {/* Grid lines (0 to 10) */}
+        {[0, 2, 4, 6, 8, 10].map((val) => {
           const y = paddingTop + chartHeight - (val / maxVal) * chartHeight;
           return (
             <g key={val}>

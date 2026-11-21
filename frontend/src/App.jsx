@@ -16,6 +16,7 @@ import {
   formatDisplayDate,
   resetToLiveDate,
 } from "./services/dateService";
+import { isSevere } from "./services/severityScale";
 
 export function App() {
   const [currentUser, setCurrentUser] = useState(authService.getUser());
@@ -247,7 +248,7 @@ export function App() {
     (p) =>
       p.status === "ACTION NEEDED" ||
       p.statusType === "danger" ||
-      (p.currentSeverity && p.currentSeverity >= 4)
+      isSevere(p.currentSeverity)
   ).length;
 
   // Active wound title calculation for header

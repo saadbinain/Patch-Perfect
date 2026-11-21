@@ -22,6 +22,7 @@ import { SeverityTrendChart } from "../Common/SeverityTrendChart";
 import { api, extractTissueStats } from "../../services/api";
 import { getWoundLabel } from "../../services/woundLabel";
 import { resolveMediaUrl } from "../../services/apiConfig";
+import { SEVERITY_MAX, isSevere, isModerate } from "../../services/severityScale";
 
 // What a clinician types to record that the patient has no allergies.
 const NO_ALLERGY_ANSWERS = /^(none|none known|no known( drug)? allergies|nka|nkda|n\/a|no)\.?$/i;
@@ -553,8 +554,8 @@ export const PatientDetailScreen = ({
                   ? patient.scans || []
                   : [];
               const currentSev = w.current_severity ?? w.currentSeverity ?? null;
-              const statusType = w.status_type || w.statusType || (currentSev >= 4 ? "danger" : "info");
-              const statusLabel = w.status || (currentSev >= 4 ? "ACTION NEEDED" : "STABLE");
+              const statusType = w.status_type || w.statusType || (isSevere(currentSev) ? "danger" : "info");
+              const statusLabel = w.status || (isSevere(currentSev) ? "ACTION NEEDED" : "STABLE");
 
               return (
                 <div
@@ -653,15 +654,15 @@ export const PatientDetailScreen = ({
                             style={{
                               fontSize: "0.68rem",
                               fontWeight: "800",
-                              color: currentSev >= 4 ? "#991B1B" : currentSev >= 3 ? "#92400E" : "#065F46",
-                              background: currentSev >= 4 ? "#FEF2F2" : currentSev >= 3 ? "#FFFBEB" : "#ECFDF5",
-                              border: `1px solid ${currentSev >= 4 ? "#FECDD3" : currentSev >= 3 ? "#FDE68A" : "#A7F3D0"}`,
+                              color: isSevere(currentSev) ? "#991B1B" : isModerate(currentSev) ? "#92400E" : "#065F46",
+                              background: isSevere(currentSev) ? "#FEF2F2" : isModerate(currentSev) ? "#FFFBEB" : "#ECFDF5",
+                              border: `1px solid ${isSevere(currentSev) ? "#FECDD3" : isModerate(currentSev) ? "#FDE68A" : "#A7F3D0"}`,
                               padding: "2px 6px",
                               borderRadius: "6px",
                               whiteSpace: "nowrap",
                             }}
                           >
-                            Grade {currentSev}/5
+                            Grade {currentSev}/{SEVERITY_MAX}
                           </span>
                         ) : null}
 
@@ -1100,7 +1101,7 @@ export const PatientDetailScreen = ({
                       </div>
 
                       <span style={{ fontSize: "0.78rem", color: "#64748B", display: "block", marginTop: "3px" }}>
-                        Severity: <strong style={{ color: "#D97706" }}>{activeScan.severity_level || activeScan.severityLevel || "Moderate"}</strong> (Score: {activeScan.severity_score || activeScan.severityScore})
+                        Severity: <strong style={{ color: "#D97706" }}>{activeScan.severity_level || activeScan.severityLevel || "Moderate"}</strong> (Score: {activeScan.severity_score || activeScan.severityScore}/{SEVERITY_MAX})
                       </span>
 
                       <span style={{ fontSize: "0.76rem", color: "#166534", fontWeight: "700", display: "block", marginTop: "3px" }}>
@@ -1263,7 +1264,7 @@ export const PatientDetailScreen = ({
                         )}
                       </div>
                       <span style={{ fontSize: "0.76rem", color: "#64748B" }}>
-                        Severity: <strong style={{ color: "#D97706" }}>{scan.severity_level || scan.severityLevel || "Moderate"}</strong> (Score: {scan.severity_score || scan.severityScore})
+                        Severity: <strong style={{ color: "#D97706" }}>{scan.severity_level || scan.severityLevel || "Moderate"}</strong> (Score: {scan.severity_score || scan.severityScore}/{SEVERITY_MAX})
                       </span>
                     </div>
                   </div>

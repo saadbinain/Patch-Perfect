@@ -32,7 +32,7 @@ def analyze_tissue_and_severity(image_input, region_mask=None):
             "slough_pct": float,
             "necrosis_pct": float,
             "severity_level": str ("Critical", "Severe", "Moderate", "Mild", "Minimal"),
-            "severity_score": int (1 to 5),
+            "severity_score": int (1 to 10),
             "recommendation": str
         }
     """
@@ -102,7 +102,7 @@ def analyze_tissue_and_severity(image_input, region_mask=None):
     granulation_pct, slough_pct = pcts["granulation"], pcts["slough"]
     necrosis_pct, epithelial_pct = pcts["necrotic"], pcts["epithelial"]
 
-    score, raw_level = tissue_severity(granulation_pct, slough_pct, necrosis_pct, epithelial_pct)
+    score, raw_level, exact = tissue_severity(granulation_pct, slough_pct, necrosis_pct, epithelial_pct)
     return {
         "tissue_detected": wound_pixels > 0,
         "wound_pixels": wound_pixels,
@@ -112,15 +112,20 @@ def analyze_tissue_and_severity(image_input, region_mask=None):
         "necrosis_pct": necrosis_pct,
         "epithelial_pct": epithelial_pct,
         "raw_severity_level": raw_level,
-        "severity_level": SEVERITY_LABELS[score],
+        "severity_level": severity_label(score),
         "severity_score": score,
-        "recommendation": RECOMMENDATIONS[score],
+        "severity_exact": exact,
+        "recommendation": RECOMMENDATIONS[severity_grade(score)],
     }
 
 
-SEVERITY_LABELS = {1: "Minimal", 2: "Mild", 3: "Moderate", 4: "Very Severe", 5: "Critical"}
+# Severity is scored 1-10. The labels keep the meaning of the former 1-5 grades,
+# two points per grade: 1-2 Minimal, 3-4 Mild, 5-6 Moderate, 7-8 Very Severe, 9-10 Critical.
+SEVERITY_MAX = 10
+SEVERITY_LABELS = {1: "Minimal", 2: "Mild", 3: "Moderate", 4: "Very Severe", 5: "Critical"}   # by grade
+RAW_LEVELS = {1: "LOW", 2: "MILD", 3: "MODERATE", 4: "SEVERE", 5: "CRITICAL"}
 
-RECOMMENDATIONS = {
+RECOMMENDATIONS = {   # by grade
     1: "Favorable re-epithelialization observed. Continue protective dressing and weekly check-up.",
     2: "Healthy pink granulation tissue dominant. Clean gently with sterile 0.9% saline and apply non-adherent dressing.",
     3: "Moderate slough/exudate noted. Clean wound bed with sterile saline. Consider antimicrobial foam and re-evaluate in 48h.",
@@ -128,41 +133,75 @@ RECOMMENDATIONS = {
     5: "Critical tissue necrosis and eschar present. Urgent surgical consult and systemic antibiotic review required.",
 }
 
-# A wound this large is at least "Moderate", however clean its bed looks.
+# Each driver maps to a 1-10 score along these points (in between: straight line), so the
+# score keeps moving as the wound changes instead of jumping between five steps. The
+# anchor points reproduce the former grade thresholds (e.g. necrosis 10% -> Moderate,
+# 25% -> Very Severe, 50% -> Critical; slough 30% -> Moderate, 60% -> Very Severe).
+NECROSIS_CURVE = ([0, 5, 10, 25, 50, 75], [1, 3, 5, 7, 9, 10])        # % of wound
+SLOUGH_CURVE = ([0, 10, 30, 60, 90], [1, 3, 5, 7, 8])                  # % of wound
+OPEN_CURVE = ([0, 40, 60, 100], [1, 2, 3, 4])                          # % not covered by new skin
+SIZE_CURVE = ([0, 2, 10, 25, 100], [1, 2, 3, 5, 6])                     # cm2 (colour card needed)
+
+# A wound this large is at least "Moderate" (5), however clean its bed looks.
 LARGE_WOUND_CM2 = 25.0
 
 
+def _curve(value, curve):
+    return float(np.interp(float(value or 0.0), curve[0], curve[1]))
+
+
+def _whole(score):
+    """Exact score -> displayed whole number 1-10 (halves round up)."""
+    return int(min(SEVERITY_MAX, max(1, np.floor(score + 0.5))))
+
+
+def severity_grade(score):
+    """1-10 score -> grade 1-5 (Minimal .. Critical)."""
+    return (int(score) + 1) // 2
+
+
+def severity_label(score):
+    return SEVERITY_LABELS[severity_grade(score)]
+
+
 def tissue_severity(granulation_pct, slough_pct, necrosis_pct, epithelial_pct=0.0):
-    """Severity 1-5 from the tissue mix (research model thresholds + a healing class)."""
-    if necrosis_pct >= 50:
-        return 5, "CRITICAL"
-    if necrosis_pct >= 25 or slough_pct >= 60:
-        return 4, "SEVERE"
-    if necrosis_pct >= 10 or slough_pct >= 30:
-        return 3, "MODERATE"
-    if epithelial_pct >= 60 and slough_pct < 10 and necrosis_pct < 5:
-        return 1, "LOW"  # mostly new skin: closing
-    if granulation_pct + epithelial_pct >= 60 and necrosis_pct < 10:
-        return 2, "MILD"
-    return 1, "LOW"
+    """
+    Severity from the tissue mix: (score 1-10, raw level, exact score).
+    The worst driver decides: necrosis, slough, or simply how much of the wound is
+    still open (not yet covered by new skin).
+    """
+    open_pct = max(0.0, 100.0 - float(epithelial_pct or 0.0))
+    exact = max(_curve(necrosis_pct, NECROSIS_CURVE), _curve(slough_pct, SLOUGH_CURVE), _curve(open_pct, OPEN_CURVE))
+    score = _whole(exact)
+    return score, RAW_LEVELS[severity_grade(score)], round(exact, 2)
 
 
 def apply_wound_size(sev, area_cm2):
     """
     Size-aware severity: the tissue mix alone grades a 90 cm2 clean wound the same as a
-    2 cm2 one. A large wound (>= LARGE_WOUND_CM2) is raised to at least Moderate.
-    Unknown size (no colour card) leaves the tissue grade unchanged.
+    2 cm2 one, so the size (cm2, from the colour card) is a driver too: 25 cm2 is at
+    least Moderate. Unknown size (no colour card) leaves the tissue score unchanged.
     """
     out = dict(sev)
     out["area_cm2"] = area_cm2
     out["size_adjusted"] = False
-    if area_cm2 is not None and area_cm2 >= LARGE_WOUND_CM2 and sev["severity_score"] < 3:
-        out["severity_score"] = 3
-        out["severity_level"] = SEVERITY_LABELS[3]
-        out["size_adjusted"] = True
-        out["recommendation"] = ("Large wound with a mostly clean bed. "
-                                 + RECOMMENDATIONS[sev["severity_score"]]
-                                 + " Monitor size weekly; consider referral if it is not shrinking.")
+    if area_cm2 is None:
+        return out
+    size_exact = _curve(area_cm2, SIZE_CURVE)
+    if size_exact > out.get("severity_exact", out["severity_score"]):
+        score = _whole(size_exact)
+        out["severity_exact"] = round(size_exact, 2)
+        if score > sev["severity_score"]:
+            out["severity_score"] = score
+            out["severity_level"] = severity_label(score)
+            out["raw_severity_level"] = RAW_LEVELS[severity_grade(score)]
+            out["size_adjusted"] = True
+            if area_cm2 >= LARGE_WOUND_CM2:
+                out["recommendation"] = ("Large wound with a mostly clean bed. "
+                                         + RECOMMENDATIONS[severity_grade(sev["severity_score"])]
+                                         + " Monitor size weekly; consider referral if it is not shrinking.")
+            else:
+                out["recommendation"] = RECOMMENDATIONS[severity_grade(score)]
     return out
 
 
@@ -172,6 +211,7 @@ NECROSIS_STEP = 5.0     # percentage points
 SLOUGH_STEP = 15.0      # percentage points, and slough must reach SLOUGH_MIN
 SLOUGH_MIN = 20.0
 SHRINK_OUTWEIGHS_SLOUGH = -0.20   # a wound that shrank this much is improving despite more slough
+SEVERITY_STEP = 2                 # points on the 1-10 scale (one grade); smaller changes are noise
 
 
 def tissue_change(current, reference):
@@ -198,7 +238,7 @@ def evaluate_healing_status(current_area=None, baseline_area=None, current_sever
     necrotic / epithelial percentages.
     - First scan of a wound                          -> "Baseline"
     - Necrosis appeared / grew (+5 points)           -> "Deteriorating", even if smaller
-    - Severity score went up                         -> "Deteriorating"
+    - Severity score went up 2+ points (1-10 scale)  -> "Deteriorating"
     - Slough grew (+15 points, to 20%+) unless the wound shrank 20%+  -> "Deteriorating"
     - Area change > +5%                              -> "Deteriorating"
     - Area change < -5%                              -> "Improving"
@@ -214,7 +254,7 @@ def evaluate_healing_status(current_area=None, baseline_area=None, current_sever
     necrosis_worse, slough_worse, tissue_better = tissue_change(current_tissue, baseline_tissue)
     if necrosis_worse:
         return "Deteriorating"
-    if baseline_severity_score is not None and current_severity_score > baseline_severity_score:
+    if baseline_severity_score is not None and current_severity_score - baseline_severity_score >= SEVERITY_STEP:
         return "Deteriorating"
     if slough_worse and (area_change is None or area_change > SHRINK_OUTWEIGHS_SLOUGH):
         return "Deteriorating"
@@ -227,6 +267,6 @@ def evaluate_healing_status(current_area=None, baseline_area=None, current_sever
 
     if tissue_better:
         return "Improving"
-    if baseline_severity_score is not None and current_severity_score < baseline_severity_score:
+    if baseline_severity_score is not None and baseline_severity_score - current_severity_score >= SEVERITY_STEP:
         return "Improving"
     return "Stable"

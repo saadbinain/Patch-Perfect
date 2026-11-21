@@ -194,14 +194,15 @@ class ScanSaveTests(ApiTestCase):
 
     def test_invalid_severity_rejected(self):
         p = self.create_patient()
-        self.assertEqual(self.save_scan(p, severity_score=9).status_code, 400)
+        self.assertEqual(self.save_scan(p, severity_score=11).status_code, 400)
+        self.assertEqual(self.save_scan(p, severity_score=0).status_code, 400)
 
     def test_wound_status_follows_scan(self):
         p = self.create_patient()
-        self.save_scan(p, severity_score=4, healing_status="Stable")
+        self.save_scan(p, severity_score=7, healing_status="Stable")
         wound = self.client.get(f"/api/patients/{p['custom_id']}/").json()["wounds"][0]
         self.assertEqual(wound["status"], "ACTION NEEDED")
-        self.assertEqual(wound["current_severity"], 4)
+        self.assertEqual(wound["current_severity"], 7)
 
 
 class WoundTypeLockTests(ApiTestCase):
@@ -645,7 +646,7 @@ class TissueRulesTests(unittest.TestCase):
     def test_black_eschar_is_necrotic(self):
         sev = analyze_tissue_and_severity(self.patches((25, 20, 18)))
         self.assertEqual(sev["necrosis_pct"], 100.0)
-        self.assertEqual(sev["severity_score"], 5)
+        self.assertEqual(sev["severity_score"], 10)
 
     def test_large_clean_wound_is_at_least_moderate(self):
         from ai_models.severity_analyzer import apply_wound_size
@@ -833,11 +834,11 @@ class TrendVsPreviousScanTests(unittest.TestCase):
 
     def test_severity_increase_alone_is_deteriorating(self):
         self.assertEqual(evaluate_healing_status(
-            current_area=20.0, baseline_area=20.3, current_severity_score=3, baseline_severity_score=2), "Deteriorating")
+            current_area=20.0, baseline_area=20.3, current_severity_score=5, baseline_severity_score=3), "Deteriorating")
 
     def test_severity_drop_at_same_size_is_improving(self):
         self.assertEqual(evaluate_healing_status(
-            current_area=20.0, baseline_area=20.3, current_severity_score=2, baseline_severity_score=3), "Improving")
+            current_area=20.0, baseline_area=20.3, current_severity_score=3, baseline_severity_score=5), "Improving")
 
     @staticmethod
     def scan(cm2, severity, ratio=0.02, new_rules=True):
@@ -862,23 +863,54 @@ class TrendVsPreviousScanTests(unittest.TestCase):
 
     def test_worse_than_last_scan_but_better_than_day1(self):
         # Day 1 was 30 cm2, last week 6 cm2, today ~12 cm2 -> this week got worse
-        r = self.run_follow_up(previous=self.scan(6.0, 2), day1=self.scan(30.0, 2))
+        r = self.run_follow_up(previous=self.scan(6.0, 4), day1=self.scan(30.0, 4))
         self.assertEqual(r["healing_status"], "Deteriorating")
         self.assertEqual(r["pipeline_metrics"]["healing_vs_day1"]["status"], "Improving")
         self.assertGreater(r["pipeline_metrics"]["healing_vs_previous"]["size_change"], 0.5)
 
     def test_better_than_last_scan(self):
-        r = self.run_follow_up(previous=self.scan(20.0, 2), day1=self.scan(30.0, 2))
+        r = self.run_follow_up(previous=self.scan(20.0, 4), day1=self.scan(30.0, 4))
         self.assertEqual(r["healing_status"], "Improving")
 
     def test_without_card_size_is_ignored(self):
         # last scan covered 10x more of the photo, but without the card size can't be trusted
-        r = self.run_follow_up(previous=self.scan(None, 2, ratio=0.15), day1=self.scan(None, 2, ratio=0.15), with_card=False)
+        r = self.run_follow_up(previous=self.scan(None, 4, ratio=0.15), day1=self.scan(None, 4, ratio=0.15), with_card=False)
         self.assertEqual(r["healing_status"], "Stable")
         self.assertIsNone(r["pipeline_metrics"]["healing_vs_previous"]["size_change"])
         self.assertTrue(any("this photo has no colour card" in w for w in r["warnings"]))
 
     def test_without_card_and_old_previous_scan_is_not_compared(self):
-        r = self.run_follow_up(previous=self.scan(None, 2, new_rules=False), day1=self.scan(None, 2, new_rules=False), with_card=False)
+        r = self.run_follow_up(previous=self.scan(None, 4, new_rules=False), day1=self.scan(None, 4, new_rules=False), with_card=False)
         self.assertEqual(r["healing_status"], "Not compared")
         self.assertTrue(any("could not be worked out" in w for w in r["warnings"]))
+
+
+class TenPointSeverityTests(unittest.TestCase):
+    """Severity 1-10: it moves with the wound, and the grade labels keep their meaning."""
+
+    def test_former_thresholds_keep_their_grade(self):
+        from ai_models.severity_analyzer import tissue_severity, severity_label
+        cases = [((100, 0, 0, 0), "Mild"), ((40, 0, 0, 60), "Minimal"), ((70, 30, 0, 0), "Moderate"),
+                 ((85, 0, 10, 5), "Moderate"), ((75, 0, 25, 0), "Very Severe"), ((40, 60, 0, 0), "Very Severe"),
+                 ((50, 0, 50, 0), "Critical")]
+        for mix, label in cases:
+            score = tissue_severity(*mix)[0]
+            self.assertEqual(severity_label(score), label, (mix, score))
+
+    def test_score_moves_within_a_grade(self):
+        from ai_models.severity_analyzer import tissue_severity
+        # slough 32% and 58% are both "Moderate"-to-"Very Severe" territory, but must differ
+        self.assertLess(tissue_severity(68, 32, 0, 0)[0], tissue_severity(42, 58, 0, 0)[0])
+        # less necrosis -> lower score, even inside the same grade
+        self.assertLess(tissue_severity(60, 0, 52, 0)[0], tissue_severity(25, 0, 75, 0)[0])
+
+    def test_shrinking_large_wound_scores_lower(self):
+        from ai_models.severity_analyzer import apply_wound_size
+        clean = analyze_tissue_and_severity(TissueRulesTests.patches((191, 30, 20)))
+        scores = [apply_wound_size(clean, a)["severity_score"] for a in (100, 40, 12, 3)]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertGreater(scores[0], scores[-1])
+
+    def test_small_change_does_not_flip_the_trend(self):
+        self.assertEqual(evaluate_healing_status(
+            current_area=20.0, baseline_area=20.3, current_severity_score=6, baseline_severity_score=5), "Stable")

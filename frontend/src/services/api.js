@@ -4,6 +4,7 @@ import { simulateAIAnalysis } from "../data/mockAI";
 import { authService } from "./authService";
 import { API_BASE, ApiError, OFFLINE_MESSAGE, errorMessageFrom } from "./apiConfig";
 import { formatDisplayDate, getEffectiveDate } from "./dateService";
+import { isSevere } from "./severityScale";
 
 export { ApiError };
 
@@ -98,7 +99,7 @@ const UNSET_TYPES = new Set(["", "Pending AI Scan", "Unclassified"]);
 export const woundTypeIsSet = (wound) => Boolean(wound) && !UNSET_TYPES.has(wound.wound_type || "");
 
 const statusFor = (severityScore, healingStatus) => {
-  if (severityScore >= 4) return { status: "ACTION NEEDED", statusType: "danger" };
+  if (isSevere(severityScore)) return { status: "ACTION NEEDED", statusType: "danger" };
   if (healingStatus === "Deteriorating") return { status: "DETERIORATING", statusType: "warning" };
   if (healingStatus === "Improving") return { status: "IMPROVING", statusType: "success" };
   if (healingStatus === "Baseline") return { status: "BASELINE", statusType: "info" };

@@ -30,7 +30,7 @@ def report(label, path, r):
           + (f", white balance {card['white_balance_gains']}" if card["white_balance_gains"] else ""))
     print(f"  Tissue:         granulation {t['granulation']}%  slough {t['slough']}%  "
           f"necrotic {t['necrotic']}%  new skin {t['epithelial']}%")
-    print(f"  Severity:       {r['severity_score']}/5 {r['severity_level']}"
+    print(f"  Severity:       {r['severity_score']}/10 {r['severity_level']}"
           + ("  (raised: large wound)" if pm["severity_size_adjusted"] else ""))
     print(f"  Recommendation: {r['recommendation']}")
     for w in r["warnings"]:

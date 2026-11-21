@@ -1,5 +1,6 @@
 import React from "react";
 import { ChevronRight, MapPin } from "lucide-react";
+import { SEVERITY_MAX, isSevere, isModerate } from "../../services/severityScale";
 
 export const PatientCard = ({ patient, isSelected = false, onClick }) => {
   const getInitials = (name) => {
@@ -27,11 +28,11 @@ export const PatientCard = ({ patient, isSelected = false, onClick }) => {
   const anatomicalLocation = primaryWound.anatomical_location || patient.anatomicalLocation || "Lower Extremity";
   const woundType = primaryWound.wound_type || patient.woundType || "Diabetic Wound";
   const status = (patient.status || "AWAITING SCAN").toUpperCase();
-  const statusType = patient.statusType || (severityScore >= 4 ? "danger" : "info");
+  const statusType = patient.statusType || (isSevere(severityScore) ? "danger" : "info");
 
   // Determine status color scheme & icon
   const getStatusConfig = () => {
-    if (statusType === "danger" || status === "ACTION NEEDED" || (severityScore && severityScore >= 4)) {
+    if (statusType === "danger" || status === "ACTION NEEDED" || isSevere(severityScore)) {
       return {
         bg: "#FEF2F2",
         border: "#FECDD3",
@@ -192,15 +193,15 @@ export const PatientCard = ({ patient, isSelected = false, onClick }) => {
               style={{
                 fontSize: "0.7rem",
                 fontWeight: "800",
-                color: severityScore >= 4 ? "#991B1B" : severityScore >= 3 ? "#92400E" : "#065F46",
-                background: severityScore >= 4 ? "#FEF2F2" : severityScore >= 3 ? "#FFFBEB" : "#ECFDF5",
-                border: `1px solid ${severityScore >= 4 ? "#FECDD3" : severityScore >= 3 ? "#FDE68A" : "#A7F3D0"}`,
+                color: isSevere(severityScore) ? "#991B1B" : isModerate(severityScore) ? "#92400E" : "#065F46",
+                background: isSevere(severityScore) ? "#FEF2F2" : isModerate(severityScore) ? "#FFFBEB" : "#ECFDF5",
+                border: `1px solid ${isSevere(severityScore) ? "#FECDD3" : isModerate(severityScore) ? "#FDE68A" : "#A7F3D0"}`,
                 padding: "2px 7px",
                 borderRadius: "6px",
                 whiteSpace: "nowrap",
               }}
             >
-              Grade {severityScore}/5
+              Grade {severityScore}/{SEVERITY_MAX}
             </span>
           ) : (
             <span

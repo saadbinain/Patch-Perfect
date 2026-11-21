@@ -13,6 +13,7 @@ import {
   Users,
 } from "lucide-react";
 import { PatientCard } from "./PatientCard";
+import { isSevere } from "../../services/severityScale";
 
 export const WoundProfilesDashboard = ({
   patients = [],
@@ -31,7 +32,7 @@ export const WoundProfilesDashboard = ({
     (p) =>
       p.status === "ACTION NEEDED" ||
       p.statusType === "danger" ||
-      (p.currentSeverity && p.currentSeverity >= 4)
+      isSevere(p.currentSeverity)
   ).length;
 
   const improvingCount = patients.filter(
@@ -66,7 +67,7 @@ export const WoundProfilesDashboard = ({
       return (
         p.status === "ACTION NEEDED" ||
         p.statusType === "danger" ||
-        (p.currentSeverity && p.currentSeverity >= 4)
+        isSevere(p.currentSeverity)
       );
     }
     if (activeFilter === "improving") {

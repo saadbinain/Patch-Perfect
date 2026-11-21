@@ -3,7 +3,7 @@
  * 1. ResNet50: Wound matching / Patient similarity check
  * 2. FUSegNet: Wound boundary segmentation & localization
  * 3. VGG16: Wound type classification (Diabetic / Pressure / Venous / Surgical)
- * 4. FPN + VGG16: Tissue segmentation (granulation, slough, necrotic) & Severity Scoring (1 to 5)
+ * 4. FPN + VGG16: Tissue segmentation (granulation, slough, necrotic) & Severity Scoring (1 to 10)
  */
 
 export const simulateAIAnalysis = async (imageDataUrl, selectedPatient, selectedWoundId = null) => {
@@ -69,16 +69,17 @@ export const simulateAIAnalysis = async (imageDataUrl, selectedPatient, selected
   const tissueStats = tissueOptions[Math.floor(Math.random() * tissueOptions.length)];
 
   // Severity Level assignment
-  const severityScore = Math.floor(Math.random() * 5) + 1; // 1 to 5
+  const severityScore = Math.floor(Math.random() * 10) + 1; // 1 to 10
+  const severityGrade = Math.ceil(severityScore / 2); // 1 Minimal .. 5 Critical
   const severityLabels = {
     1: "Minimal",
     2: "Mild",
     3: "Moderate",
-    4: "Severe",
+    4: "Very Severe",
     5: "Critical",
   };
 
-  const healingStatuses = severityScore <= 2 ? "Improving" : severityScore === 3 ? "Stable" : "Action Needed";
+  const healingStatuses = severityGrade <= 2 ? "Improving" : severityGrade === 3 ? "Stable" : "Action Needed";
 
   const recommendations = {
     1: "Excellent granulation progression. Continue hydrocolloid secondary dressing and weekly checks.",
@@ -151,11 +152,11 @@ export const simulateAIAnalysis = async (imageDataUrl, selectedPatient, selected
     id: `scan-${Date.now()}`,
     timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) + " Today",
     severityScore,
-    severityLevel: severityLabels[severityScore],
+    severityLevel: severityLabels[severityGrade],
     woundType: selectedType.type,
     location: selectedType.location,
     healingStatus: healingStatuses,
-    recommendation: recommendations[severityScore],
+    recommendation: recommendations[severityGrade],
     pipelineResults: {
       similarityCheck: similarityResult,
       segmentation: {
@@ -170,9 +171,9 @@ export const simulateAIAnalysis = async (imageDataUrl, selectedPatient, selected
       },
       tissueAnalysis: {
         model: "FPN + VGG16",
-        granulationPercent: severityScore <= 2 ? 78 : severityScore === 3 ? 50 : 25,
-        sloughPercent: severityScore <= 2 ? 15 : severityScore === 3 ? 35 : 50,
-        necroticPercent: severityScore <= 2 ? 7 : severityScore === 3 ? 15 : 25,
+        granulationPercent: severityGrade <= 2 ? 78 : severityGrade === 3 ? 50 : 25,
+        sloughPercent: severityGrade <= 2 ? 15 : severityGrade === 3 ? 35 : 50,
+        necroticPercent: severityGrade <= 2 ? 7 : severityGrade === 3 ? 15 : 25,
       },
     },
   };

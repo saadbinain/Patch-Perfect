@@ -79,7 +79,7 @@ class WoundAssessmentScan(models.Model):
     wound_profile = models.ForeignKey(WoundProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name='scans')
     image = models.ImageField(upload_to='wound_images/', null=True, blank=True)
     image_base64 = models.TextField(blank=True, null=True, help_text="Cached base64 preview")
-    severity_score = models.PositiveSmallIntegerField(default=3)
+    severity_score = models.PositiveSmallIntegerField(default=5)  # 1-10
     severity_level = models.CharField(max_length=30, default='Moderate')
     healing_status = models.CharField(max_length=30, default='Stable')
     wound_type = models.CharField(max_length=50, default='Diabetic Ulcer')
