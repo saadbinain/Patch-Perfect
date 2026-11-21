@@ -334,10 +334,10 @@ def _distance_note(card, previous_scan):
     linear = float(np.sqrt(cur / prev))  # >1: camera closer than last time
     if linear >= DISTANCE_CHANGE_WARN:
         return round(linear, 2), (f"This photo was taken closer than the last one (card looks {linear:.1f}x bigger). "
-                                  "Size is still measured in cm², but matching the distance gives more reliable results.")
+                                  "Matching the distance of the last photo gives more reliable results.")
     if linear <= 1 / DISTANCE_CHANGE_WARN:
         return round(linear, 2), (f"This photo was taken further away than the last one (card looks {1 / linear:.1f}x smaller). "
-                                  "Size is still measured in cm², but matching the distance gives more reliable results.")
+                                  "Matching the distance of the last photo gives more reliable results.")
     return round(linear, 2), None
 
 
@@ -675,8 +675,8 @@ class AIPipelineManager:
         # Colour card, found on the FULL photo (it is outside the clinician's crop)
         card = detect_colour_card(pil_input)
         if not card["detected"]:
-            warnings.append("Colour card not found in the photo, so the wound size could not be measured in cm². "
-                            "Place the card next to the wound, flat and fully in frame.")
+            warnings.append("Colour card not found in the photo. Place the card next to the wound, flat and fully in frame, "
+                            "for accurate colours and a reliable healing trend.")
         distance_change, distance_warning = _distance_note(card, previous_scan)
         if distance_warning:
             warnings.append(distance_warning)

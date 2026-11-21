@@ -770,12 +770,12 @@ export const AIAnalysisWizard = ({
             />
             {!isDetectingBox && cardFound === false && (
               <p style={{ fontSize: "0.74rem", color: "#854D0E", background: "#FEF9C3", borderRadius: "8px", padding: "8px 10px", margin: 0, lineHeight: 1.4 }}>
-                Colour card not found. Wound size can't be measured in cm² without it. Retake with the card flat next to the wound.
+                Colour card not found. Retake with the card flat next to the wound, for accurate colours and a reliable healing trend.
               </p>
             )}
             {!isDetectingBox && cardFound === true && (
               <p style={{ fontSize: "0.74rem", color: "#166534", margin: 0 }}>
-                Colour card found: size will be measured in cm².
+                Colour card found.
               </p>
             )}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "2px" }}>
@@ -1043,11 +1043,8 @@ export const AIAnalysisWizard = ({
         note: analysisResult.pipelineResults?.healingVsPrevious ? "Since last scan" : null,
       },
     ];
-    const seg = analysisResult.pipelineResults?.segmentation || {};
-    const card = analysisResult.pipelineResults?.colourCard;
     const vsPrev = analysisResult.pipelineResults?.healingVsPrevious;
     const vsDay1 = analysisResult.pipelineResults?.healingVsDay1;
-    const pct = (c) => (c == null ? "" : ` ${c > 0 ? "+" : "−"}${Math.abs(Math.round(c * 100))}% size`);
 
     return (
       <div className="app-card" style={{ padding: "18px 16px", display: "flex", flexDirection: "column", gap: "16px" }}>
@@ -1085,31 +1082,6 @@ export const AIAnalysisWizard = ({
           ))}
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "baseline",
-            gap: "8px",
-            background: "#F8FAFC",
-            border: "1px solid #E2E8F0",
-            borderRadius: "14px",
-            padding: "10px 14px",
-          }}
-        >
-          <span style={{ fontSize: "0.68rem", fontWeight: "700", color: "#64748B", textTransform: "uppercase" }}>
-            Wound size
-          </span>
-          <span style={{ textAlign: "right" }}>
-            <strong style={{ fontSize: "0.95rem", color: "#1E293B" }}>
-              {seg.wound_area_cm2 != null ? `${seg.wound_area_cm2.toFixed(1)} cm²` : "Not measured"}
-            </strong>
-            <span style={{ fontSize: "0.66rem", color: "#94A3B8", display: "block" }}>
-              {card?.detected ? "Scaled with the colour card" : "Colour card not found in photo"}
-            </span>
-          </span>
-        </div>
-
         {vsPrev && (
           <div
             style={{
@@ -1125,7 +1097,6 @@ export const AIAnalysisWizard = ({
                 Since last scan
               </span>
               <strong>{vsPrev.status}</strong>
-              {pct(vsPrev.size_change)}
             </div>
             {vsDay1 && (
               <div style={{ background: "#F8FAFC", border: "1px solid #E2E8F0", borderRadius: "12px", padding: "8px 10px" }}>
@@ -1133,7 +1104,6 @@ export const AIAnalysisWizard = ({
                   Since Day 1
                 </span>
                 <strong>{vsDay1.status}</strong>
-                {pct(vsDay1.size_change)}
               </div>
             )}
           </div>

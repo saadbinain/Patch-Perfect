@@ -137,10 +137,7 @@ export const PatientDetailScreen = ({
     const day = scanDay(chronologicalScans[idx]);
     return day ? `Scan ${idx + 1} · Day ${day}` : `Scan ${idx + 1}`;
   };
-  const scanSize = (scan) => {
-    const cm2 = scan?.wound_area_cm2 ?? scan?.pipelineResults?.segmentation?.wound_area_cm2;
-    return typeof cm2 === "number" ? `${cm2.toFixed(1)} cm²` : null;
-  };
+
 
   const handleSaveNewWound = async (e) => {
     e.preventDefault();
@@ -1106,15 +1103,6 @@ export const PatientDetailScreen = ({
                         Severity: <strong style={{ color: "#D97706" }}>{activeScan.severity_level || activeScan.severityLevel || "Moderate"}</strong> (Score: {activeScan.severity_score || activeScan.severityScore})
                       </span>
 
-                      <span style={{ fontSize: "0.78rem", color: "#64748B", display: "block", marginTop: "3px" }}>
-                        Wound size:{" "}
-                        {scanSize(activeScan) ? (
-                          <strong style={{ color: "#0F172A" }}>{scanSize(activeScan)}</strong>
-                        ) : (
-                          <span style={{ color: "#94A3B8" }}>not measured (no colour card)</span>
-                        )}
-                      </span>
-
                       <span style={{ fontSize: "0.76rem", color: "#166534", fontWeight: "700", display: "block", marginTop: "3px" }}>
                         Healing Status: {activeScan.healing_status || activeScan.healingStatus || "Stable"}
                       </span>
@@ -1276,14 +1264,6 @@ export const PatientDetailScreen = ({
                       </div>
                       <span style={{ fontSize: "0.76rem", color: "#64748B" }}>
                         Severity: <strong style={{ color: "#D97706" }}>{scan.severity_level || scan.severityLevel || "Moderate"}</strong> (Score: {scan.severity_score || scan.severityScore})
-                      </span>
-                      <span style={{ fontSize: "0.76rem", color: "#64748B", display: "block", whiteSpace: "nowrap" }}>
-                        Size:{" "}
-                        {scanSize(scan) ? (
-                          <strong style={{ color: "#334155" }}>{scanSize(scan)}</strong>
-                        ) : (
-                          <span style={{ color: "#94A3B8" }}>not measured</span>
-                        )}
                       </span>
                     </div>
                   </div>

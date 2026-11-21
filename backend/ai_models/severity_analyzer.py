@@ -160,7 +160,7 @@ def apply_wound_size(sev, area_cm2):
         out["severity_score"] = 3
         out["severity_level"] = SEVERITY_LABELS[3]
         out["size_adjusted"] = True
-        out["recommendation"] = ("Large wound (%.0f cm\u00b2) with a mostly clean bed. " % area_cm2
+        out["recommendation"] = ("Large wound with a mostly clean bed. "
                                  + RECOMMENDATIONS[sev["severity_score"]]
                                  + " Monitor size weekly; consider referral if it is not shrinking.")
     return out
